@@ -334,6 +334,16 @@ export class NodeStorage{
         return NodeStorage.sessionId
     }
 
+    async getServerActivity(signal: AbortSignal): Promise<{ generating: number; saving: boolean }> {
+        const res = await this.authFetch('/api/server-activity', { method: 'GET', signal, cache: 'no-store' })
+        if (!res.ok) throw await this.storageRequestError('serverActivity', res)
+        const data = await res.json()
+        if (!Number.isSafeInteger(data.generating) || data.generating < 0 || typeof data.saving !== 'boolean') {
+            throw new Error('Invalid server activity')
+        }
+        return data
+    }
+
     // Called once after JWT auth is confirmed. Issues a session cookie so that
     // <img src="/api/asset/..."> can be served without JS-injected headers.
     private async initSession() {

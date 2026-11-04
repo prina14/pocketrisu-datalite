@@ -44,6 +44,7 @@
     import RequestStatusToaster from './lib/UI/GUI/RequestStatusToaster.svelte';
     import { createKeepAliveAudio } from './ts/keepAliveAudio';
     import { RISU_APP_INTERNAL_DRAG_TYPE, RISU_SIDEBAR_DRAG_TYPE } from './ts/dragTypes';
+    import ServerActivityNotice from './lib/Others/ServerActivityNotice.svelte';
 
     let aprilFools = $state(new Date().getMonth() === 3 && new Date().getDate() === 1)
     let aprilFoolsPage = $state(0)
@@ -293,4 +294,7 @@
     {/if}
     <Toaster />
     <RequestStatusToaster />
+    {#if $loadedStore && !$accountImportBlocking}
+        <ServerActivityNotice />
+    {/if}
 </main>

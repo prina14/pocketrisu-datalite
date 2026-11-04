@@ -1,6 +1,8 @@
 import { helpEn } from "./help.en";
 
 export const languageEnglish = {
+    serverActivityWorking: "The server is working…",
+    serverActivityUnavailable: "Unable to check server activity",
     formating: {
         main: "Main Prompt",
         jailbreak: "Jailbreak Prompt",

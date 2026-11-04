@@ -1,6 +1,8 @@
 import { helpKo } from "./help.ko";
 
 export const languageKorean = {
+  serverActivityWorking: "서버에서 작업 중입니다…",
+  serverActivityUnavailable: "서버 작업 상태를 확인할 수 없습니다",
   formating: {
     main: "메인 프롬프트",
     jailbreak: "탈옥 프롬프트",

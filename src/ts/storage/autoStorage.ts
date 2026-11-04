@@ -80,6 +80,11 @@ export class AutoStorage{
         return this.realStorage.claimWriterLock()
     }
 
+    async getServerActivity(signal: AbortSignal) {
+        await this.Init()
+        return this.realStorage.getServerActivity(signal)
+    }
+
     /** Get the last known ETag for database.bin */
     getDbEtag(): string | null {
         return this.realStorage._lastDbEtag

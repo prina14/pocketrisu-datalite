@@ -3951,6 +3951,16 @@ const { createModelJobs } = require('./model-jobs.cjs');
 const modelJobs = createModelJobs({ saveDir: savePath, logger });
 modelJobs.registerRoutes(app, { auth: checkProxyAuth });
 
+// Advisory only: reading this status never claims or revokes a writer session.
+// Return counts, not job bodies, prompts, or chat contents.
+app.get('/api/server-activity', async (req, res) => {
+    if (!await checkAuth(req, res)) return;
+    const now = Date.now();
+    const proxyCount = [...proxyStreamJobs.values()].filter(job => !job.done && job.deadlineAt > now).length;
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json({ generating: modelJobs.activeCount() + proxyCount, saving: !sessionLock.isIdle() });
+});
+
 // app.get('/api/password', async(req, res)=> {
 //     if(password === ''){
 //         res.send({status: 'unset'})

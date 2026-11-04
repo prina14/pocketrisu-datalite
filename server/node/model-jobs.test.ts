@@ -244,10 +244,12 @@ describe('model-jobs', () => {
         upstream.chunks = ['data: first\n\n']
         upstream.delayMs = 20
         upstream.hang = true // upstream never ends on its own
+        const activeBefore = store.activeCount()
 
         const { json } = await createJob()
         const jobId = json.jobId as string
         await sleep(200)
+        expect(store.activeCount()).toBe(activeBefore + 1)
 
         const delRes = await fetch(`${base}/api/model-jobs/${jobId}`, {
             method: 'DELETE',
@@ -258,6 +260,7 @@ describe('model-jobs', () => {
 
         const meta = await waitForStatus(base, jobId, ['aborted'])
         expect(meta.status).toBe('aborted')
+        expect(store.activeCount()).toBe(activeBefore)
         // Upstream connection was torn down by the abort.
         const deadline = Date.now() + 3000
         while (!upstream.closed && Date.now() < deadline) await sleep(50)
@@ -357,6 +360,7 @@ describe('model-jobs', () => {
         const meta = store2.getJob(jobId)
         expect(meta.status).toBe('failed')
         expect(meta.error).toBe('server restart')
+        expect(store2.activeCount()).toBe(0)
         store2.close()
 
         // Clean up the still-live in-memory job from store 1.
