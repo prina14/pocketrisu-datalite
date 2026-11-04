@@ -10,6 +10,7 @@ import { alertInput, waitAlert, notifyError } from "../alert"
 import { decodeRisuSave, encodeRisuSaveLegacy } from "./risuSave"
 import { normalizeChat } from "./database.svelte"
 import type { PatchServerTimings } from "./saveMetrics"
+import { transferCache } from './transferCache'
 
 const AUTH_FETCH_TRANSIENT_MAX_RETRIES = 3
 const AUTH_FETCH_TRANSIENT_BASE_DELAY_MS = 500
@@ -625,8 +626,17 @@ export class NodeStorage{
         const headers: Record<string, string> = {
             'file-path': Buffer.from(key, 'utf-8').toString('hex')
         }
-
-        const da = await this.authFetch('/api/read', { method: "GET", headers })
+        const isDatabase = key === 'database/database.bin'
+        const copyKey = isDatabase ? 'db:' + key : key.startsWith('plugin-storage/')
+            ? 'plugin:' + Buffer.from(key.slice('plugin-storage/'.length).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')
+            : null
+        const copy = copyKey ? await transferCache.get(copyKey) : null
+        if (copy) headers['if-none-match'] = copy.etag
+        const da = await this.authFetch('/api/read', { method: "GET", headers, cache: 'no-store' })
+        if (da.status === 304 && copy) {
+            if (isDatabase) this._lastDbEtag = copy.etag
+            return Buffer.from(copy.data)
+        }
         if(da.status < 200 || da.status >= 300){
             throw await this.storageRequestError('getItem', da)
         }
@@ -641,6 +651,8 @@ export class NodeStorage{
         if (data.length === 0){
             return null
         }
+        const copyEtag = etag ?? da.headers.get('x-storage-etag')
+        if (copyKey && copyEtag) await transferCache.put(copyKey, copyEtag, new Uint8Array(data))
 
         return data
     }
@@ -1051,27 +1063,67 @@ export class NodeStorage{
 
     // Streams every plugin-storage value (NDJSON `[key, json]` per line).
     async getPluginStorageAll(onEntry: (key: string, text: string) => void): Promise<void> {
-        const da = await this.authFetch('/api/plugin-storage/all', { method: 'GET' })
+        const prefix = 'plugin:'
+        const versions = (await transferCache.versions(prefix)).slice(0, 100_000)
+        let da = await this.authFetch('/api/plugin-storage/sync', {
+            method: 'POST', cache: 'no-store',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ versions }),
+        })
+        let delta = true
+        // Old servers keep working during a rolling upgrade.
+        if (da.status === 404 || da.status === 405) {
+            delta = false
+            da = await this.authFetch('/api/plugin-storage/all', { method: 'GET', cache: 'no-store' })
+        }
         if (da.status < 200 || da.status >= 300) throw await this.storageRequestError('pluginStorageAll', da)
         const reader = da.body!.getReader()
         const decoder = new TextDecoder()
+        const encoder = new TextEncoder()
         let buffer = ''
-        while (true) {
-            const { done, value } = await reader.read()
-            if (done) break
-            buffer += decoder.decode(value, { stream: true })
-            const lines = buffer.split('\n')
-            buffer = lines.pop()!
-            for (const line of lines) {
-                if (!line) continue
-                const [key, text] = JSON.parse(line)
+        let complete = false
+        const ingest = async (line: string) => {
+            const row = JSON.parse(line)
+            if (delta && row?.done === true) { complete = true; return }
+            if (complete || !Array.isArray(row) || typeof row[0] !== 'string' ||
+                (typeof row[1] !== 'string' && !(delta && row[1] === null)) ||
+                (delta && typeof row[2] !== 'string')) throw new Error('Invalid plugin sync entry')
+            const [key, text, etag] = row
+            if (text === null) {
+                const copy = await transferCache.get(prefix + key)
+                if (copy?.etag === etag) {
+                    onEntry(key, new TextDecoder().decode(copy.data))
+                } else {
+                    // Eviction/quota/another tab can remove a copy after the
+                    // manifest was sent. Read the current value, never invent
+                    // an empty value or cache it under an outdated version.
+                    const encoded = Buffer.from(key, 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+                    const data = await this.getItem('plugin-storage/' + encoded)
+                    if (data) onEntry(key, data.toString('utf8'))
+                }
+            } else {
                 onEntry(key, text)
+                if (delta) await transferCache.put(prefix + key, etag, encoder.encode(text))
             }
         }
-        buffer += decoder.decode()
-        if (buffer.trim()) {
-            const [key, text] = JSON.parse(buffer)
-            onEntry(key, text)
+        try {
+            while (true) {
+                const { done, value } = await reader.read()
+                if (done) break
+                buffer += decoder.decode(value, { stream: true })
+                const lines = buffer.split('\n')
+                buffer = lines.pop()!
+                for (const line of lines) {
+                    if (!line) continue
+                    await ingest(line)
+                }
+            }
+            buffer += decoder.decode()
+            if (buffer.trim()) await ingest(buffer)
+            if (delta && !complete) throw new Error('Incomplete plugin sync')
+        } finally {
+            await reader.cancel().catch(() => {})
+            reader.releaseLock()
         }
     }
 

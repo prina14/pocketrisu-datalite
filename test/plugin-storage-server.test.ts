@@ -13,7 +13,7 @@
  *       add/replace/remove are routed to kv, everything else is 409.
  */
 import { describe, test, expect, afterAll } from 'vitest'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { writeFile, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -616,5 +616,83 @@ describe('GET /api/plugin-storage/all', () => {
         const { srv } = await boot()
         const res = await fetch(`http://127.0.0.1:${srv.port}/api/plugin-storage/all`)
         expect(res.status).not.toBe(200)
+    })
+})
+
+describe('validated mobile transfers', () => {
+    async function sync(client: RisuClient, versions: [string, string][] = []) {
+        const res = await client.fetch('/api/plugin-storage/sync', {
+            method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ versions }),
+        })
+        expect(res.status).toBe(200)
+        expect(res.headers.get('cache-control')).toBe('private, no-store')
+        const text = await res.text()
+        const rows = text.trim().split('\n').map(l => JSON.parse(l))
+        expect(rows.pop()).toEqual({ done: true })
+        return { rows: rows as [string, string | null, string][], bytes: Buffer.byteLength(text) }
+    }
+
+    test('large unchanged plugin values are not retransmitted; same-size edits and deletions are detected', async () => {
+        const { client } = await boot()
+        await writePluginKey(client, 'memory', randomBytes(512 * 1024).toString('hex'))
+        await writePluginKey(client, 'edited', 'AAA')
+        await writePluginKey(client, '__proto__', 'safe')
+        const first = await sync(client)
+        const versions = first.rows.map(([k, , hash]) => [k, hash] as [string, string])
+        const memoryVersion = versions.find(([k]) => k === 'memory')![1]
+        const perKey = await client.fetch('/api/read', { headers: {
+            'file-path': hex(`${PREFIX}${encodeKey('memory')}`), 'if-none-match': memoryVersion,
+        } })
+        expect(perKey.status).toBe(304)
+        expect(perKey.headers.get('x-storage-etag')).toBe(memoryVersion)
+        expect((await perKey.arrayBuffer()).byteLength).toBe(0)
+        const warm = await sync(client, versions)
+        expect(warm.rows.every(r => r[1] === null)).toBe(true)
+        expect(warm.bytes).toBeLessThan(first.bytes / 1000)
+        await writePluginKey(client, 'edited', 'BBB')
+        await client.fetch('/api/remove', { headers: { 'file-path': hex(`${PREFIX}${encodeKey('__proto__')}`) } })
+        const changed = await sync(client, versions)
+        expect(changed.rows.find(r => r[0] === 'memory')![1]).toBeNull()
+        expect(changed.rows.find(r => r[0] === 'edited')![1]).toBe('"BBB"')
+        expect(changed.rows.some(r => r[0] === '__proto__')).toBe(false)
+        console.info(`Plugin payload: cold ${first.bytes} bytes, unchanged reconnect ${warm.bytes} bytes`)
+    })
+
+    test('an import invalidates plugin versions and DB validators', async () => {
+        const { client } = await boot()
+        expect((await client.importBackup(backupWith({ memory: 'before' }))).ok).toBe(true)
+        const first = await sync(client)
+        const versions = first.rows.map(([k, , hash]) => [k, hash] as [string, string])
+        const read = () => client.fetch('/api/read', { headers: { 'file-path': DB_KEY_HEX } })
+        const db = await read()
+        const etag = db.headers.get('x-db-etag')!
+        expect(etag).toBeTruthy()
+        await db.arrayBuffer()
+        const validated = await client.fetch('/api/read', { headers: { 'file-path': DB_KEY_HEX, 'if-none-match': etag } })
+        expect(validated.status).toBe(304)
+        expect((await validated.arrayBuffer()).byteLength).toBe(0)
+        // Change the main DB too; plugin changes alone intentionally leave it identical.
+        expect((await client.importBackup(encodeBackup([{ name: 'database.risudat', data: dbBlob({ memory: 'after!' }, { username: 'updated' }) }]))).ok).toBe(true)
+        const after = await sync(client, versions)
+        expect(after.rows[0][1]).toBe('"after!"')
+        const changedDb = await client.fetch('/api/read', { headers: { 'file-path': DB_KEY_HEX, 'if-none-match': etag } })
+        expect(changedDb.status).toBe(200)
+        expect(changedDb.headers.get('x-db-etag')).not.toBe(etag)
+        await changedDb.arrayBuffer()
+    })
+
+    test('authentication precedes cache validation, and malformed manifests are rejected', async () => {
+        const { srv, client } = await boot()
+        const anonymous = await fetch(`http://127.0.0.1:${srv.port}/api/plugin-storage/sync`, {
+            method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"versions":[]}',
+        })
+        expect(anonymous.status).not.toBe(200)
+        for (const versions of [null, {}, [['key']], [[{}, 'hash']]]) {
+            const res = await client.fetch('/api/plugin-storage/sync', {
+                method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ versions }),
+            })
+            expect(res.status).toBe(400)
+            await res.text()
+        }
     })
 })

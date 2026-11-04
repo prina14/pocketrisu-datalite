@@ -1285,7 +1285,7 @@ function shouldCompress(req, res) {
     // to the end (no heartbeats), and long-term-memory plugins push it to
     // hundreds of MB of text — over a remote link gzip pays off (#93).
     if (contentType.includes('application/x-ndjson')) {
-        if (url.split('?')[0] === '/api/plugin-storage/all') {
+        if (['/api/plugin-storage/all', '/api/plugin-storage/sync'].includes(url.split('?')[0])) {
             return true;
         }
         return false;
@@ -4339,6 +4339,10 @@ app.get('/api/read', async (req, res, next) => {
     if(!await checkAuth(req, res)){
         return;
     }
+    // This URL serves many different keys selected by a header. Do not let
+    // an HTTP cache reuse one key's response for another. Local copies are
+    // explicitly validated after authentication on every read.
+    res.setHeader('Cache-Control', 'private, no-store');
     const filePath = normalizeFilePathHeader(req.headers['file-path']);
     if (!filePath) {
         console.log('no path')
@@ -4386,10 +4390,15 @@ app.get('/api/read', async (req, res, next) => {
                     return next(e);
                 }
                 dbEtag = computeBufferEtag(value);
+                res.setHeader('x-db-etag', dbEtag);
                 if (req.headers['if-none-match'] === dbEtag) {
                     return res.status(304).end();
                 }
-                res.setHeader('x-db-etag', dbEtag);
+            }
+            if (key.startsWith('plugin-storage/')) {
+                const version = nodeCrypto.createHash('sha256').update(value).digest('hex');
+                res.setHeader('x-storage-etag', version);
+                if (req.headers['if-none-match'] === version) return res.status(304).end();
             }
             res.setHeader('Content-Type', 'application/octet-stream');
             res.send(value);
@@ -4419,6 +4428,42 @@ app.get('/api/plugin-storage/index', async (req, res, next) => {
 // preload: the V2 API is synchronous, so every key has to be in the client
 // cache before a V2 plugin runs, and fetching N keys one GET at a time made
 // plugin loading take minutes over a remote link (v1.11.0 report).
+// A new client supplies versions of its origin-local copies. SHA-256 is
+// computed from the current bytes (not timestamps), so same-size edits,
+// snapshot restores and imports invalidate copies too. No disk format change.
+app.post('/api/plugin-storage/sync', async (req, res, next) => {
+    if (!await checkAuth(req, res)) return;
+    const versions = req.body?.versions;
+    if (!Array.isArray(versions) || versions.length > 100_000 ||
+        versions.some(row => !Array.isArray(row) || row.length !== 2 ||
+            typeof row[0] !== 'string' || typeof row[1] !== 'string')) {
+        return res.status(400).json({ error: 'Invalid plugin cache versions' });
+    }
+    const known = new Map(versions);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('content-type', 'application/x-ndjson; charset=utf-8');
+    try {
+        let closed = false;
+        res.once('close', () => { closed = true; });
+        for (const { key, text } of pluginStorage.entriesRaw()) {
+            if (closed) return;
+            const version = nodeCrypto.createHash('sha256').update(text, 'utf8').digest('hex');
+            if (!res.write(JSON.stringify([key, known.get(key) === version ? null : text, version]) + '\n')) {
+                await new Promise(resolve => {
+                    let emitter;
+                    const done = () => { emitter.off('drain', done); res.off('close', done); resolve(); };
+                    emitter = res.on('drain', done);
+                    res.once('close', done);
+                });
+            }
+        }
+        res.end(JSON.stringify({ done: true }) + '\n');
+    } catch (error) {
+        if (res.headersSent) { res.destroy(error); return; }
+        next(error);
+    }
+});
+
 app.get('/api/plugin-storage/all', async (req, res, next) => {
     if(!await checkAuth(req, res)){
         return;
