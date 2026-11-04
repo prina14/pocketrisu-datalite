@@ -5,6 +5,7 @@ on:
   push:
     tags:
       - 'v*'
+      - '!v*-datalite.*'
 
 env:
   REGISTRY: ghcr.io

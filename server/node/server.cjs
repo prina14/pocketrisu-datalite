@@ -1654,7 +1654,7 @@ function getCurrentVersion() {
 }
 
 // ── Deployment type & self-update helpers ─────────────────────────────────────
-const GITHUB_REPO = 'PocketRisu/PocketRisu';
+const { REPOSITORY: GITHUB_REPO, releaseInfo: dataliteReleaseInfo } = require('./datalite-release.cjs');
 
 const deploymentType = (() => {
     // Only portable builds have the .portable marker (created by CI release workflow).
@@ -2042,6 +2042,15 @@ async function fetchLatestRelease(lang) {
     if (UPDATE_CHECK_DISABLED) return null;
     try {
         const currentVersion = getCurrentVersion();
+        if (!process.env.RISU_UPDATE_URL) {
+            const release = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
+                headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'PocketRisu-DataLite' },
+                signal: AbortSignal.timeout(15_000),
+            });
+            if (release.status === 404) return dataliteReleaseInfo(currentVersion, {});
+            if (!release.ok) return null;
+            return dataliteReleaseInfo(currentVersion, await release.json());
+        }
         const params = new URLSearchParams({
             v: currentVersion,
             d: deploymentType,

@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const REPO = 'PocketRisu/PocketRisu';
+const { REPOSITORY: REPO, portableAsset, newerVersion } = require('../server/node/datalite-release.cjs');
 const ROOT = path.resolve(__dirname, '..');
 
 const isWin = process.platform === 'win32';
@@ -231,7 +231,7 @@ async function main() {
 
     if (!latest) error('Could not determine latest version.');
 
-    if (current === latest) {
+    if (!newerVersion(current.replace(/^v/, ''), latest.replace(/^v/, ''))) {
         log(`Already up to date (${current}).`);
         return;
     }
@@ -239,7 +239,7 @@ async function main() {
     log(`New version available: ${latest}`);
 
     const suffix = getPlatformSuffix();
-    const asset = (release.assets || []).find(a => a.name.includes(suffix));
+    const asset = portableAsset(release.assets || [], suffix);
     if (!asset) {
         error(`No portable package found for ${suffix}. Download manually from:\n  ${release.html_url}`);
     }

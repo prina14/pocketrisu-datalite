@@ -50,19 +50,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: windows-latest
-            platform: win
-            arch: x64
-          - os: ubuntu-latest
-            platform: linux
-            arch: x64
-          - os: ubuntu-24.04-arm
-            platform: linux
-            arch: arm64
-          - os: macos-latest
-            platform: macos
-            arch: arm64
+        # This custom release targets the user's Oracle x64 VM only.
+        include: ${{ fromJSON(contains(github.ref_name, '-datalite.') && '[{"os":"ubuntu-22.04","platform":"linux","arch":"x64"}]' || '[{"os":"windows-latest","platform":"win","arch":"x64"},{"os":"ubuntu-latest","platform":"linux","arch":"x64"},{"os":"ubuntu-24.04-arm","platform":"linux","arch":"arm64"},{"os":"macos-latest","platform":"macos","arch":"arm64"}]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
@@ -139,6 +128,10 @@ jobs:
           NODE_ARCH="${{ matrix.arch }}"
           mkdir -p portable/bin
           curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" -o node.tar.xz
+          curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o node-shasums.txt
+          EXPECTED=$(awk -v name="node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" '$2 == name {print $1}' node-shasums.txt)
+          test -n "$EXPECTED"
+          echo "$EXPECTED  node.tar.xz" | sha256sum --check -
           tar -xJf node.tar.xz
           cp "node-v${NODE_VERSION}-linux-${NODE_ARCH}/bin/node" portable/bin/node
           chmod +x portable/bin/node
@@ -292,6 +285,7 @@ jobs:
         shell: bash
         run: |
           touch portable/.portable
+          printf 'v%s\n' '${{ steps.version.outputs.version }}' > portable/.installed-version
 
       # Boot the assembled portable with its bundled Node and trimmed
       # node_modules; catches any server dependency the generator missed.
@@ -349,6 +343,7 @@ jobs:
           LEGACY_NAME="RisuAI-NodeOnly-v${VERSION}-${{ matrix.platform }}-${{ matrix.arch }}"
           mv portable "$NAME"
           tar -czf "${NAME}.tar.gz" "$NAME"
+          sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
           rm -rf "$NAME"
           # Dual asset: legacy filename for v1.5.x in-app self-update.
           # v1.5.x server.cjs has the old "RisuAI-NodeOnly-" prefix hardcoded;
@@ -379,9 +374,10 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
+          name: PocketRisu DataLite ${{ github.ref_name }}
           generate_release_notes: true
           draft: true
+          prerelease: false
           files: |
             PocketRisu-*
             RisuAI-NodeOnly-*
