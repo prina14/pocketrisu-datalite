@@ -11,6 +11,7 @@ const { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkS
 const fs = require('fs/promises')
 const nodeCrypto = require('crypto')
 const zlib = require('zlib')
+const { MIN_DELTA_BYTES, MAX_COPY_BYTES, validManifest, makeDelta } = require('./readDelta.mjs');
 const rateLimit = require('express-rate-limit')
 const { WebSocketServer } = require('ws')
 const Vips = require('wasm-vips')
@@ -4335,7 +4336,7 @@ app.post('/api/set_password', async (req, res) => {
     }
 })
 
-app.get('/api/read', async (req, res, next) => {
+async function readStorage(req, res, next) {
     if(!await checkAuth(req, res)){
         return;
     }
@@ -4343,6 +4344,8 @@ app.get('/api/read', async (req, res, next) => {
     // an HTTP cache reuse one key's response for another. Local copies are
     // explicitly validated after authentication on every read.
     res.setHeader('Cache-Control', 'private, no-store');
+    const deltaRead = req.method === 'POST';
+    if (deltaRead && !validManifest(req.body)) return res.status(400).json({ error: 'Invalid read delta manifest' });
     const filePath = normalizeFilePathHeader(req.headers['file-path']);
     if (!filePath) {
         console.log('no path')
@@ -4355,6 +4358,11 @@ app.get('/api/read', async (req, res, next) => {
     }
     try {
         const key = Buffer.from(filePath, 'hex').toString('utf-8');
+        const isDb = key === 'database/database.bin';
+        const isPlugin = key.startsWith('plugin-storage/');
+        if (deltaRead && !isDb && !isPlugin) return res.status(400).json({ error: 'Unsupported read delta key' });
+        res.setHeader('x-read-resource', isDb ? 'database' : isPlugin ? 'plugin-storage' : 'other');
+        res.setHeader('x-read-transfer', 'full');
         // Flush pending patches before reading database.bin
         if (key === 'database/database.bin') {
             await flushPendingDb();
@@ -4392,22 +4400,42 @@ app.get('/api/read', async (req, res, next) => {
                 dbEtag = computeBufferEtag(value);
                 res.setHeader('x-db-etag', dbEtag);
                 if (req.headers['if-none-match'] === dbEtag) {
+                    res.setHeader('x-read-transfer', 'unchanged');
                     return res.status(304).end();
                 }
             }
             if (key.startsWith('plugin-storage/')) {
                 const version = nodeCrypto.createHash('sha256').update(value).digest('hex');
                 res.setHeader('x-storage-etag', version);
-                if (req.headers['if-none-match'] === version) return res.status(304).end();
+                if (req.headers['if-none-match'] === version) {
+                    res.setHeader('x-read-transfer', 'unchanged');
+                    return res.status(304).end();
+                }
             }
             res.setHeader('Content-Type', 'application/octet-stream');
+            res.setHeader('x-read-full-bytes', value.length);
+            if (deltaRead && value.length >= MIN_DELTA_BYTES && value.length <= MAX_COPY_BYTES) {
+                const hash = bytes => nodeCrypto.createHash('sha256').update(bytes).digest('hex');
+                const packet = Buffer.from(makeDelta(value, req.body, hash));
+                // A mostly replaced or highly compressible value can be cheaper
+                // as a full response. Compare wire sizes, not just raw sizes.
+                const gzip = /\bgzip\b/.test(req.headers['accept-encoding'] || '');
+                if (packet.length < value.length * 0.8 &&
+                    (!gzip || zlib.gzipSync(packet).length < zlib.gzipSync(value).length)) {
+                    res.setHeader('x-read-delta', '1');
+                    res.setHeader('x-read-transfer', 'delta');
+                    return res.send(packet);
+                }
+            }
             res.send(value);
         }
     } catch (error) {
         logger.error('[Read] Failed to read stored data', error);
         next(error);
     }
-});
+}
+app.get('/api/read', readStorage);
+app.post('/api/read-delta', readStorage);
 
 // Names + sizes of every plugin-storage key, no values. Backs the client's
 // synchronous keys()/length and the storage viewer. `migrated` is whether the
@@ -4448,7 +4476,11 @@ app.post('/api/plugin-storage/sync', async (req, res, next) => {
         for (const { key, text } of pluginStorage.entriesRaw()) {
             if (closed) return;
             const version = nodeCrypto.createHash('sha256').update(text, 'utf8').digest('hex');
-            if (!res.write(JSON.stringify([key, known.get(key) === version ? null : text, version]) + '\n')) {
+            const unchanged = known.get(key) === version;
+            // New clients can fetch changes inside a large value through the
+            // validated byte-delta reader. Old clients still receive strings.
+            const readDelta = req.body.readDelta === true && known.has(key) && !unchanged && Buffer.byteLength(text) >= MIN_DELTA_BYTES;
+            if (!res.write(JSON.stringify([key, unchanged ? null : readDelta ? { read: true } : text, version]) + '\n')) {
                 await new Promise(resolve => {
                     let emitter;
                     const done = () => { emitter.off('drain', done); res.off('close', done); resolve(); };

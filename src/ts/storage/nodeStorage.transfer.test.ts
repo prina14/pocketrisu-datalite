@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { createHash, randomBytes } from 'node:crypto'
+import { gunzipSync } from 'fflate'
+import { makeDelta, makeManifest } from '../../../server/node/readDelta.mjs'
 
 vi.mock('../alert', () => ({ alertInput: vi.fn(), waitAlert: vi.fn(), notifyError: vi.fn() }))
 vi.mock('./risuSave', () => ({ decodeRisuSave: vi.fn(), encodeRisuSaveLegacy: vi.fn() }))
@@ -101,5 +104,67 @@ describe('plugin delta preload', () => {
         const seen = new Map()
         await storage(fetcher).getPluginStorageAll((k, v) => seen.set(k, v))
         expect(seen.get('b')).toBe('"한글"')
+    })
+})
+
+describe('changed large values', () => {
+    const hash = (data: Uint8Array) => createHash('sha256').update(data).digest('hex')
+    function prepare(size = 512 * 1024) {
+        const old = randomBytes(size)
+        const next = Buffer.concat([old.subarray(0, 12345), Buffer.from('edit'), old.subarray(12345)])
+        copies.set('db:database/database.bin', { key: 'db:database/database.bin', etag: 'old', data: old })
+        return { old, next, packet: makeDelta(next, makeManifest(old, hash)!, hash) }
+    }
+    test('reconstructs a changed DB and uses its latest validator; gzips the manifest', async () => {
+        // Even maximum-sized chunks must produce a manifest large enough
+        // to exercise request compression, independently of random cuts.
+        const { old, next, packet } = prepare(2 * 1024 * 1024)
+        const fetcher = vi.fn().mockResolvedValue(new Response(packet, { headers: { 'x-read-delta': '1', 'x-db-etag': 'new' } }))
+        const s = storage(fetcher)
+        expect(hash(await s.getItem('database/database.bin'))).toBe(hash(next))
+        expect(s._lastDbEtag).toBe('new')
+        expect(fetcher.mock.calls[0][0]).toBe('/api/read-delta')
+        const init = fetcher.mock.calls[0][1]
+        expect(init.headers.get('content-encoding')).toBe('gzip')
+        expect(JSON.parse(new TextDecoder().decode(gunzipSync(init.body)))).toEqual(makeManifest(old, hash))
+        expect(hash(copies.get('db:database/database.bin').data)).toBe(hash(next))
+    })
+    test('corrupt or truncated deltas trigger one full authenticated read without a validator', async () => {
+        const { next, packet } = prepare()
+        const fetcher = vi.fn().mockResolvedValueOnce(new Response(packet.subarray(0, 10), { headers: { 'x-read-delta': '1', 'x-db-etag': 'bad' } }))
+            .mockResolvedValueOnce(new Response(next, { headers: { 'x-db-etag': 'full' } }))
+        const s = storage(fetcher)
+        expect(await s.getItem('database/database.bin')).toEqual(next)
+        expect(fetcher).toHaveBeenCalledTimes(2)
+        expect(fetcher.mock.calls[1][0]).toBe('/api/read')
+        expect(fetcher.mock.calls[1][1].headers.has('if-none-match')).toBe(false)
+        expect(s._lastDbEtag).toBe('full')
+    })
+    test('old servers fall back to the existing conditional GET', async () => {
+        const { old } = prepare()
+        const fetcher = vi.fn().mockResolvedValueOnce(new Response('', { status: 404 }))
+            .mockResolvedValueOnce(new Response(null, { status: 304 }))
+        expect(await storage(fetcher).getItem('database/database.bin')).toEqual(old)
+        expect(fetcher.mock.calls[1][0]).toBe('/api/read')
+    })
+    test('a connection interrupted during the delta body also fetches one full value', async () => {
+        const { next } = prepare()
+        const interrupted = new Response(new ReadableStream({ start(c) { c.error(new TypeError('connection lost')) } }), { headers: { 'x-read-delta': '1' } })
+        const fetcher = vi.fn().mockResolvedValueOnce(interrupted)
+            .mockResolvedValueOnce(new Response(next, { headers: { 'x-db-etag': 'recovered' } }))
+        expect(await storage(fetcher).getItem('database/database.bin')).toEqual(next)
+        expect(fetcher).toHaveBeenCalledTimes(2)
+    })
+    test('V2 bulk markers fetch the changed value through the same byte-delta path', async () => {
+        const old = Buffer.from(JSON.stringify(randomBytes(300000).toString('base64')))
+        const next = Buffer.from(old); next[12345] = next[12345] === 65 ? 66 : 65
+        copies.set('plugin:memory', { key: 'plugin:memory', etag: hash(old), data: old })
+        const packet = makeDelta(next, makeManifest(old, hash)!, hash)
+        const fetcher = vi.fn().mockResolvedValueOnce(ndjson([['memory', { read: true }, hash(next)], { done: true }]))
+            .mockResolvedValueOnce(new Response(packet, { headers: { 'x-read-delta': '1', 'x-storage-etag': hash(next) } }))
+        const onEntry = vi.fn()
+        await storage(fetcher).getPluginStorageAll(onEntry)
+        expect(onEntry).toHaveBeenCalledWith('memory', next.toString())
+        expect(fetcher.mock.calls[1][0]).toBe('/api/read-delta')
     })
 })

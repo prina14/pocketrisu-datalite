@@ -11,6 +11,15 @@ import { decodeRisuSave, encodeRisuSaveLegacy } from "./risuSave"
 import { normalizeChat } from "./database.svelte"
 import type { PatchServerTimings } from "./saveMetrics"
 import { transferCache } from './transferCache'
+import { Sha256 } from '@aws-crypto/sha256-js'
+import { gzipSync } from 'fflate'
+import { MIN_DELTA_BYTES, makeManifest, applyDelta } from '../../../server/node/readDelta.mjs'
+
+function readHash(bytes: Uint8Array): string {
+    const hash = new Sha256()
+    hash.update(bytes)
+    return Buffer.from(hash.digestSync()).toString('hex')
+}
 
 const AUTH_FETCH_TRANSIENT_MAX_RETRIES = 3
 const AUTH_FETCH_TRANSIENT_BASE_DELAY_MS = 500
@@ -632,7 +641,23 @@ export class NodeStorage{
             : null
         const copy = copyKey ? await transferCache.get(copyKey) : null
         if (copy) headers['if-none-match'] = copy.etag
-        const da = await this.authFetch('/api/read', { method: "GET", headers, cache: 'no-store' })
+        let da: Response
+        const manifest = copy && copy.data.length >= MIN_DELTA_BYTES ? makeManifest(copy.data, readHash) : null
+        if (manifest) {
+            const text = JSON.stringify(manifest)
+            const deltaHeaders = { ...headers, 'content-type': 'application/json' }
+            let body: BodyInit = text
+            if (text.length > 4096) {
+                deltaHeaders['content-encoding'] = 'gzip'
+                body = gzipSync(new TextEncoder().encode(text)) as BodyInit
+            }
+            da = await this.authFetch('/api/read-delta', { method: 'POST', headers: deltaHeaders, body, cache: 'no-store' })
+            if (da.status === 404 || da.status === 405) {
+                da = await this.authFetch('/api/read', { method: 'GET', headers, cache: 'no-store' })
+            }
+        } else {
+            da = await this.authFetch('/api/read', { method: 'GET', headers, cache: 'no-store' })
+        }
         if (da.status === 304 && copy) {
             if (isDatabase) this._lastDbEtag = copy.etag
             return Buffer.from(copy.data)
@@ -641,13 +666,29 @@ export class NodeStorage{
             throw await this.storageRequestError('getItem', da)
         }
 
-        // Capture ETag for database.bin
+        let data: Buffer
+        try {
+            data = Buffer.from(await da.arrayBuffer())
+            if (da.headers.get('x-read-delta') === '1') {
+                if (!copy) throw new Error('Missing read delta base')
+                data = Buffer.from(applyDelta(copy.data, data, readHash))
+            }
+        } catch (error) {
+            if (da.headers.get('x-read-delta') !== '1') throw error
+            // A corrupt/evicted base or an interrupted delta must never reach
+            // the DB decoder. Fetch a full value once, without a validator.
+            delete headers['if-none-match']
+            da = await this.authFetch('/api/read', { method: 'GET', headers, cache: 'no-store' })
+            if (!da.ok || da.headers.has('x-read-delta')) throw await this.storageRequestError('getItem', da)
+            data = Buffer.from(await da.arrayBuffer())
+        }
+        // Capture the validator of the fully reconstructed value, never that
+        // of a failed delta or of the older local base.
         const etag = da.headers.get('x-db-etag')
         if (etag) {
             this._lastDbEtag = etag
         }
 
-        const data = Buffer.from(await da.arrayBuffer())
         if (data.length === 0){
             return null
         }
@@ -1068,7 +1109,7 @@ export class NodeStorage{
         let da = await this.authFetch('/api/plugin-storage/sync', {
             method: 'POST', cache: 'no-store',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ versions }),
+            body: JSON.stringify({ versions, readDelta: true }),
         })
         let delta = true
         // Old servers keep working during a rolling upgrade.
@@ -1085,12 +1126,13 @@ export class NodeStorage{
         const ingest = async (line: string) => {
             const row = JSON.parse(line)
             if (delta && row?.done === true) { complete = true; return }
+            const readDelta = delta && row?.[1]?.read === true
             if (complete || !Array.isArray(row) || typeof row[0] !== 'string' ||
-                (typeof row[1] !== 'string' && !(delta && row[1] === null)) ||
+                (typeof row[1] !== 'string' && !(delta && row[1] === null) && !readDelta) ||
                 (delta && typeof row[2] !== 'string')) throw new Error('Invalid plugin sync entry')
             const [key, text, etag] = row
-            if (text === null) {
-                const copy = await transferCache.get(prefix + key)
+            if (text === null || readDelta) {
+                const copy = !readDelta ? await transferCache.get(prefix + key) : null
                 if (copy?.etag === etag) {
                     onEntry(key, new TextDecoder().decode(copy.data))
                 } else {
