@@ -28,7 +28,18 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build
+      # Keep validation ahead of the artifact build and all release publishing.
+      - name: Validate release
+        run: |
+          pnpm run check
+          pnpm exec vitest run --maxWorkers=2 --testTimeout=15000
+          pnpm exec vitest run --config vitest.config.server.ts --maxWorkers=2
+
+      - name: Verify package version matches tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node -e 'if ("v" + require("./package.json").version !== process.env.GITHUB_REF_NAME) process.exit(1)'
+
+      - name: Build portable application
         run: pnpm build
         env:
           NODE_OPTIONS: '--max-old-space-size=4096'
@@ -371,6 +382,7 @@ jobs:
           merge-multiple: true
 
       - name: Create GitHub Release
+        id: prepared_release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
@@ -381,3 +393,27 @@ jobs:
           files: |
             PocketRisu-*
             RisuAI-NodeOnly-*
+
+      - name: Publish verified DataLite release
+        if: contains(github.ref_name, '-datalite.')
+        uses: actions/github-script@v8
+        env:
+          RELEASE_ID: ${{ steps.prepared_release.outputs.id }}
+        with:
+          script: |
+            const release_id = Number(process.env.RELEASE_ID);
+            if (!Number.isSafeInteger(release_id) || release_id <= 0) throw new Error('Missing prepared release id');
+            const version = context.ref.replace('refs/tags/v', '');
+            const archive = `PocketRisu-v${version}-linux-x64.tar.gz`;
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              owner: context.repo.owner, repo: context.repo.repo, release_id,
+            });
+            for (const name of [archive, `${archive}.sha256`]) {
+              if (!assets.some(asset => asset.name === name && asset.size > 0 && asset.state === 'uploaded')) {
+                throw new Error(`Release remains a draft: missing uploaded asset ${name}`);
+              }
+            }
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner, repo: context.repo.repo, release_id,
+              draft: false, prerelease: false, make_latest: 'true',
+            });

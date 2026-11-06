@@ -6,7 +6,7 @@
 
 > A custom build of PocketRisu focused on reducing mobile-web data transfer through persistent caching, conditional reads, and content-defined chunk synchronization.
 
-- **커스텀 버전:** `v1.17.0-datalite.1` — PocketRisu DataLite 1
+- **커스텀 버전:** `v1.17.0-datalite.2` — PocketRisu DataLite 2
 - **원본 기반:** [PocketRisu v1.17.0](https://github.com/PocketRisu/PocketRisu), commit `40851fc9831856a36cb5c14799c1f501f32dc133`
 - **원본과의 관계:** PocketRisu의 커스텀 빌드이며, 원본 프로젝트의 공식 배포판과 구분됩니다.
 - **라이선스:** [GPL-3.0](LICENSE)

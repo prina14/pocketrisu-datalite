@@ -24,3 +24,10 @@ test('a checksum file is never selected as the portable archive', () => {
     expect(portableAsset([archive], 'linux-arm64')).toBeUndefined()
     expect(portableAsset([{ name: 'PocketRisu-v1.17.0-datalite.1-win-x64.zip' }], 'win-x64')).toBeTruthy()
 })
+
+test('update button is available only when the running platform has an archive', () => {
+    const platform = { win32: 'win', linux: 'linux', darwin: 'macos' }[process.platform]
+    const base = { tag_name: 'v1.17.0-datalite.2', draft: false, prerelease: false }
+    expect(releaseInfo('1.17.0-datalite.1', { ...base, assets: [] }).manualOnly).toBe(true)
+    expect(releaseInfo('1.17.0-datalite.1', { ...base, assets: [{ name: `PocketRisu-v1.17.0-datalite.2-${platform}-${process.arch}.${platform === 'win' ? 'zip' : 'tar.gz'}` }] }).manualOnly).toBe(false)
+})

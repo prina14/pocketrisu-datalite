@@ -81,4 +81,4 @@ sudo systemctl status pocketrisu-datalite
 
 업데이트 대상은 `prina14/pocketrisu-datalite`입니다. 원본 PocketRisu 업데이트로 커스텀 코드가 교체되지 않도록 분리했습니다. 공개된 커스텀 Release가 있어야 앱 내 업데이트 및 `./update.sh`로 받을 수 있습니다. 비공개 저장소나 Draft 릴리스는 로그인 후 포터블을 내려받아 수동 교체합니다.
 
-GitHub의 `v*-datalite.*` 태그는 Linux x64 포터블만 빌드하며, Docker 배포는 실행하지 않습니다. 기존 워크플로 설정대로 릴리스는 **Draft**로 생성됩니다. 저장소 소유자가 검토 후 공개할 수 있습니다. `Source code (zip)`은 실행 파일이 포함된 포터블과 다릅니다.
+GitHub의 `v*-datalite.*` 태그는 Linux x64 포터블만 빌드하며, Docker 배포는 실행하지 않습니다. `v1.17.0-datalite.2`부터 테스트·포터블 기동 검사와 파일 업로드가 완료되면 자동으로 공개하고 Latest로 지정합니다. 실패하면 Draft 상태로 남아 자동 업데이트 대상으로 노출되지 않습니다. `Source code (zip)`은 실행 파일이 포함된 포터블과 다릅니다.

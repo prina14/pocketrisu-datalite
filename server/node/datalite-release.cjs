@@ -27,6 +27,7 @@ function releaseInfo(currentVersion, release) {
         releaseUrl: `https://github.com/${REPOSITORY}/releases`,
         releaseName: typeof release?.name === 'string' ? release.name : 'PocketRisu DataLite',
         publishedAt: typeof release?.published_at === 'string' ? release.published_at : '',
+        manualOnly: !portableAsset(Array.isArray(release?.assets) ? release.assets : [], `${{ win32: 'win', linux: 'linux', darwin: 'macos' }[process.platform]}-${process.arch}`),
     };
 }
 
