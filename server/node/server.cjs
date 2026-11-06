@@ -26,7 +26,7 @@ const getVips = () => {
     return _vipsPromise
 }
 const { kvGet, kvSet, kvDel, kvList,
-        kvDelPrefix, kvListWithSizes, kvSize, kvGetUpdatedAt, kvCopyValue, clearEntities, checkpointWal,
+        kvDelPrefix, kvListWithSizes, kvSize, kvGetUpdatedAt, kvGetReadRevision, kvCopyValue, clearEntities, checkpointWal,
         gcChunks, reclaimableChunkBytes, isDbBlobChunked, snapshotFootprint, db: sqliteDb } = require('./db.cjs');
 const {
     addLogBatch, queryLogs, clearLogs, countLogs,
@@ -86,6 +86,16 @@ const databasePatchHashCache = createPatchHashCache(calculateHash);
 
 // ETag for database.bin
 let dbEtag = null;
+const readViewTokens = new WeakMap();
+function readRevision(key) {
+    const persisted = kvGetReadRevision(key);
+    if (!persisted || key !== 'database/database.bin') return persisted;
+    const view = dbCache[DB_HEX_KEY];
+    // Include the in-memory view identity and existing write validator so
+    // edits awaiting debounce and cache invalidations cannot appear current.
+    if (view && !readViewTokens.has(view)) readViewTokens.set(view, nodeCrypto.randomUUID());
+    return `${persisted}.${view ? readViewTokens.get(view) : 'cold'}.${dbEtag || 'unknown'}`;
+}
 
 function computeBufferEtag(buffer) {
     return nodeCrypto.createHash('md5').update(buffer).digest('hex');
@@ -4386,6 +4396,18 @@ async function readStorage(req, res, next) {
         if (key === 'database/database.bin') {
             await flushPendingDb();
         }
+        if (req.headers['x-read-check-only'] === '1' && (isDb || isPlugin)) {
+            res.setHeader('x-read-transfer', 'revision-check');
+            const revision = readRevision(key);
+            if (revision) res.setHeader('x-read-revision', revision);
+            res.setHeader('x-read-version-check', '1');
+            if (revision && req.headers['if-read-revision'] === revision) {
+                res.setHeader('x-read-transfer', 'unchanged');
+                return res.status(304).end();
+            }
+            // No blob reads, serialization or hash calculation in this path.
+            return res.status(200).end();
+        }
         let value = null;
         if (key.startsWith('inlay/')) {
             value = await readInlayAssetPayload(key.slice('inlay/'.length));
@@ -4418,6 +4440,7 @@ async function readStorage(req, res, next) {
                 }
                 dbEtag = computeBufferEtag(value);
                 res.setHeader('x-db-etag', dbEtag);
+                res.setHeader('x-read-revision', readRevision(key));
                 if (req.headers['if-none-match'] === dbEtag) {
                     res.setHeader('x-read-transfer', 'unchanged');
                     return res.status(304).end();
@@ -4426,6 +4449,7 @@ async function readStorage(req, res, next) {
             if (key.startsWith('plugin-storage/')) {
                 const version = nodeCrypto.createHash('sha256').update(value).digest('hex');
                 res.setHeader('x-storage-etag', version);
+                res.setHeader('x-read-revision', readRevision(key));
                 if (req.headers['if-none-match'] === version) {
                     res.setHeader('x-read-transfer', 'unchanged');
                     return res.status(304).end();
@@ -4487,19 +4511,39 @@ app.post('/api/plugin-storage/sync', async (req, res, next) => {
         return res.status(400).json({ error: 'Invalid plugin cache versions' });
     }
     const known = new Map(versions);
+    const revisions = req.body.revisions;
+    const revisionMode = Array.isArray(revisions);
+    if (revisionMode && (revisions.length > 100_000 || revisions.some(row => !Array.isArray(row) || row.length !== 2 || typeof row[0] !== 'string' || typeof row[1] !== 'string'))) {
+        return res.status(400).json({ error: 'Invalid plugin revisions' });
+    }
+    const knownRevisions = new Map(revisionMode ? revisions : []);
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('content-type', 'application/x-ndjson; charset=utf-8');
     try {
         let closed = false;
         res.once('close', () => { closed = true; });
-        for (const { key, text } of pluginStorage.entriesRaw()) {
+        for (const entry of revisionMode ? pluginStorage.list() : pluginStorage.entriesRaw()) {
             if (closed) return;
-            const version = nodeCrypto.createHash('sha256').update(text, 'utf8').digest('hex');
-            const unchanged = known.get(key) === version;
-            // New clients can fetch changes inside a large value through the
-            // validated byte-delta reader. Old clients still receive strings.
-            const readDelta = req.body.readDelta === true && known.has(key) && !unchanged && Buffer.byteLength(text) >= MIN_DELTA_BYTES;
-            if (!res.write(JSON.stringify([key, unchanged ? null : readDelta ? { read: true } : text, version]) + '\n')) {
+            const key = entry.key;
+            const storageKey = 'plugin-storage/' + Buffer.from(key, 'utf8').toString('base64url');
+            const revision = revisionMode ? kvGetReadRevision(storageKey) : undefined;
+            if (revisionMode && !revision) continue;
+            let row;
+            if (revisionMode && knownRevisions.get(key) === revision) {
+                row = [key, null, null, revision];
+            } else if (revisionMode && req.body.readDelta === true && known.has(key) && entry.size >= MIN_DELTA_BYTES) {
+                row = [key, { read: true }, null, revision];
+            } else {
+                const raw = revisionMode ? kvGet(storageKey) : null;
+                if (revisionMode && raw === null) continue;
+                const text = revisionMode ? raw.toString('utf8') : entry.text;
+                const version = nodeCrypto.createHash('sha256').update(text, 'utf8').digest('hex');
+                const unchanged = known.get(key) === version;
+                const readDelta = req.body.readDelta === true && known.has(key) && !unchanged && Buffer.byteLength(text) >= MIN_DELTA_BYTES;
+                row = [key, unchanged ? null : readDelta ? { read: true } : text, version];
+                if (revisionMode) row.push(revision);
+            }
+            if (!res.write(JSON.stringify(row) + '\n')) {
                 await new Promise(resolve => {
                     let emitter;
                     const done = () => { emitter.off('drain', done); res.off('close', done); resolve(); };

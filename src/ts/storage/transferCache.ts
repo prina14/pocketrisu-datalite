@@ -1,11 +1,13 @@
 // Optional, origin-local copies. Never serve one without authenticating and
 // validating its version with the server first. IndexedDB also works on HTTP
 // IP addresses, where CacheStorage/crypto.subtle may be unavailable.
-export interface TransferCopy { key: string; etag: string; data: Uint8Array; usedAt: number }
+export interface TransferCopy { key: string; etag: string; data: Uint8Array; usedAt: number; revision?: string }
 export interface TransferCache {
     get(key: string): Promise<TransferCopy | null>
-    put(key: string, etag: string, data: Uint8Array): Promise<void>
-    versions(prefix: string): Promise<[string, string][]>
+    put(key: string, etag: string, data: Uint8Array, revision?: string): Promise<void>
+    updateRevision(key: string, etag: string, revision: string): Promise<void>
+    versions(prefix: string, revisionsOnly?: boolean): Promise<[string, string][]>
+    revisions(prefix: string): Promise<[string, string][]>
 }
 
 const STORE = 'copies'
@@ -39,18 +41,22 @@ export const transferCache: TransferCache = {
     async get(key) {
         try {
             const db = await open()
-            const tx = db.transaction(STORE, 'readonly')
+            const tx = db.transaction([STORE, META], 'readonly')
+            const meta = tx.objectStore(META).get(key)
             return await new Promise<TransferCopy | null>((resolve, reject) => {
                 const req = tx.objectStore(STORE).get(key)
                 req.onsuccess = () => {
                     const row = req.result
-                    resolve(row && typeof row.etag === 'string' && row.data instanceof Uint8Array ? row : null)
+                    if (!row || typeof row.etag !== 'string' || !(row.data instanceof Uint8Array)) { resolve(null); return }
+                    // Requests in one transaction finish in creation order.
+                    resolve({ ...row, revision: meta.result?.etag === row.etag ? meta.result.revision : undefined })
                 }
                 req.onerror = () => reject(req.error)
             })
         } catch { return null }
     },
-    async versions(prefix) {
+    async revisions(prefix) { return this.versions(prefix, true) },
+    async versions(prefix, revisionsOnly = false) {
         try {
             const db = await open()
             const tx = db.transaction(META, 'readonly')
@@ -61,7 +67,8 @@ export const transferCache: TransferCache = {
                     const cursor = req.result
                     if (!cursor) { resolve(); return }
                     const row = cursor.value
-                    if (typeof row.etag === 'string') result.push([row.key.slice(prefix.length), row.etag])
+                    const version = revisionsOnly ? row.revision : row.etag
+                    if (typeof version === 'string') result.push([row.key.slice(prefix.length), version])
                     cursor.continue()
                 }
                 req.onerror = () => reject(req.error)
@@ -69,7 +76,20 @@ export const transferCache: TransferCache = {
             return result
         } catch { return [] }
     },
-    async put(key, etag, data) {
+    async updateRevision(key, etag, revision) {
+        try {
+            const db = await open()
+            const tx = db.transaction(META, 'readwrite')
+            const finished = complete(tx)
+            const store = tx.objectStore(META)
+            const req = store.get(key)
+            req.onsuccess = () => {
+                if (req.result?.etag === etag) store.put({ ...req.result, revision })
+            }
+            await finished
+        } catch { /* optional cache */ }
+    },
+    async put(key, etag, data, revision) {
         if (data.byteLength > MAX_BYTES) return
         try {
             const db = await open()
@@ -78,7 +98,7 @@ export const transferCache: TransferCache = {
             const store = tx.objectStore(STORE)
             const meta = tx.objectStore(META)
             store.put({ key, etag, data, usedAt: Date.now() })
-            meta.put({ key, etag, bytes: data.byteLength, usedAt: Date.now() })
+            meta.put({ key, etag, revision, bytes: data.byteLength, usedAt: Date.now() })
             // Only metadata is scanned; never clone every large cached value.
             const rows: { key: string; bytes: number; usedAt: number }[] = []
             const req = meta.openCursor()

@@ -41,6 +41,8 @@ db.exec(`
   )
 `);
 
+const kvGetReadRevision = require('./read-revisions.cjs').createReadRevisions(db);
+
 // Entity tables (characters, chats, settings, presets, modules) were used in
 // a previous version. The tables are no longer created or used, but existing
 // databases may still contain them. They are left in place (orphaned) to avoid
@@ -247,6 +249,7 @@ module.exports = {
     db,
     // KV
     kvGet, kvSet, kvDel, kvList, kvDelPrefix, kvListWithSizes, kvSize, kvGetUpdatedAt, kvCopyValue,
+    kvGetReadRevision,
     clearEntities,
     checkpointWal,
     gcChunks,

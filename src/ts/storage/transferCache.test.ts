@@ -31,6 +31,18 @@ test('unavailable IndexedDB does not prevent network-only operation', async () =
     await expect(copies.put('plugin:a', 'sha', new Uint8Array([1]))).resolves.toBeUndefined()
 })
 
+test('revision metadata updates preserve the body and reject a mismatched validator', async () => {
+    const { transferCache: copies } = await import('./transferCache')
+    await copies.put('plugin:a', 'hash', new Uint8Array([1, 2, 3]), 'r1')
+    expect(await copies.revisions('plugin:')).toEqual([['a', 'r1']])
+    await copies.updateRevision('plugin:a', 'wrong', 'bad')
+    expect((await copies.get('plugin:a'))?.revision).toBe('r1')
+    await copies.updateRevision('plugin:a', 'hash', 'r2')
+    expect((await copies.get('plugin:a'))?.data).toEqual(new Uint8Array([1, 2, 3]))
+    expect((await copies.get('plugin:a'))?.revision).toBe('r2')
+    expect(await copies.versions('plugin:')).toEqual([['a', 'hash']])
+})
+
 test('a quota failure is optional and does not advertise an uncommitted copy', async () => {
     const { transferCache: copies } = await import('./transferCache')
     await copies.put('plugin:old', 'old', new Uint8Array([1]))

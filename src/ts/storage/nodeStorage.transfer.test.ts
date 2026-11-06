@@ -6,7 +6,7 @@ import { makeDelta, makeManifest } from '../../../server/node/readDelta.mjs'
 vi.mock('../alert', () => ({ alertInput: vi.fn(), waitAlert: vi.fn(), notifyError: vi.fn() }))
 vi.mock('./risuSave', () => ({ decodeRisuSave: vi.fn(), encodeRisuSaveLegacy: vi.fn() }))
 vi.mock('./database.svelte', () => ({ normalizeChat: (c: any) => c }))
-vi.mock('./transferCache', () => ({ transferCache: { get: vi.fn(), put: vi.fn(), versions: vi.fn() } }))
+vi.mock('./transferCache', () => ({ transferCache: { get: vi.fn(), put: vi.fn(), versions: vi.fn(), revisions: vi.fn(), updateRevision: vi.fn() } }))
 const { NodeStorage } = await import('./nodeStorage')
 const { transferCache } = await import('./transferCache')
 const copies = new Map<string, any>()
@@ -23,11 +23,39 @@ beforeEach(() => {
     vi.clearAllMocks()
     copies.clear()
     vi.mocked(transferCache.get).mockImplementation(async k => copies.get(k) ?? null)
-    vi.mocked(transferCache.put).mockImplementation(async (key, etag, data) => { copies.set(key, { key, etag, data }) })
+    vi.mocked(transferCache.put).mockImplementation(async (key, etag, data, revision) => { copies.set(key, { key, etag, data, revision }) })
     vi.mocked(transferCache.versions).mockImplementation(async prefix => [...copies.values()].filter(v => v.key.startsWith(prefix)).map(v => [v.key.slice(prefix.length), v.etag]))
+    vi.mocked(transferCache.revisions).mockImplementation(async prefix => [...copies.values()].filter(v => v.key.startsWith(prefix) && v.revision).map(v => [v.key.slice(prefix.length), v.revision]))
+    vi.mocked(transferCache.updateRevision).mockImplementation(async (key, etag, revision) => { if (copies.get(key)?.etag === etag) copies.get(key).revision = revision })
 })
 
 describe('validated boot copies', () => {
+    test('a known revision validates a large copy without uploading chunk hashes', async () => {
+        const data = randomBytes(1024 * 1024)
+        copies.set('db:database/database.bin', { etag: 'hash', revision: 'r1', data })
+        const fetcher = vi.fn().mockResolvedValue(new Response(null, { status: 304, headers: { 'x-read-revision': 'r1', 'x-read-version-check': '1' } }))
+        expect(createHash('sha256').update(await storage(fetcher).getItem('database/database.bin')).digest('hex')).toBe(createHash('sha256').update(data).digest('hex'))
+        expect(fetcher).toHaveBeenCalledTimes(1)
+        expect(fetcher.mock.calls[0][0]).toBe('/api/read')
+        expect(fetcher.mock.calls[0][1].body).toBeUndefined()
+        expect(fetcher.mock.calls[0][1].headers.get('if-read-revision')).toBe('r1')
+    })
+    test('an unchanged body with a new revision updates metadata for the next probe', async () => {
+        copies.set('db:database/database.bin', { etag: 'hash', revision: 'r1', data: bytes('body') })
+        const fetcher = vi.fn().mockResolvedValueOnce(new Response(null, { headers: { 'x-read-version-check': '1', 'x-read-revision': 'r2' } }))
+            .mockResolvedValueOnce(new Response(null, { status: 304, headers: { 'x-read-revision': 'r2' } }))
+            .mockResolvedValueOnce(new Response(null, { status: 304, headers: { 'x-read-revision': 'r2' } }))
+        await storage(fetcher).getItem('database/database.bin')
+        expect(copies.get('db:database/database.bin').revision).toBe('r2')
+        await storage(fetcher).getItem('database/database.bin')
+        expect(fetcher.mock.calls[2][1].headers.get('if-read-revision')).toBe('r2')
+    })
+    test('a server ignoring revision probes returns its normal body without a second download', async () => {
+        copies.set('db:database/database.bin', { etag: 'old', revision: 'r1', data: bytes('old') })
+        const fetcher = vi.fn().mockResolvedValue(new Response('current', { headers: { 'x-db-etag': 'new' } }))
+        expect((await storage(fetcher).getItem('database/database.bin')).toString()).toBe('current')
+        expect(fetcher).toHaveBeenCalledTimes(1)
+    })
     test('a reload validates the DB and reuses its bytes on 304', async () => {
         const fetcher = vi.fn().mockResolvedValueOnce(new Response(bytes('database'), { headers: { 'x-db-etag': 'v1' } }))
             .mockResolvedValueOnce(new Response(null, { status: 304 }))
@@ -65,6 +93,15 @@ describe('validated boot copies', () => {
 })
 
 describe('plugin delta preload', () => {
+    test('revision-only rows reuse plugin values without requiring content hashes from the server', async () => {
+        copies.set('plugin:a', { key: 'plugin:a', etag: 'sha', revision: 'r1', data: bytes('"cached"') })
+        const fetcher = vi.fn().mockResolvedValue(ndjson([['a', null, null, 'r1'], { done: true }]))
+        const onEntry = vi.fn()
+        await storage(fetcher).getPluginStorageAll(onEntry)
+        expect(onEntry).toHaveBeenCalledWith('a', '"cached"')
+        expect(JSON.parse(fetcher.mock.calls[0][1].body).revisions).toEqual([['a', 'r1']])
+        expect(fetcher).toHaveBeenCalledTimes(1)
+    })
     test('a new page reuses unchanged keys, replaces changed ones, and omits deleted ones', async () => {
         const fetcher = vi.fn().mockResolvedValueOnce(ndjson([['a', '"one"', 'h1'], ['b', '"old"', 'h2'], ['deleted', '1', 'h3'], { done: true }]))
             .mockResolvedValueOnce(ndjson([['a', null, 'h1'], ['b', '"new"', 'h4'], { done: true }]))

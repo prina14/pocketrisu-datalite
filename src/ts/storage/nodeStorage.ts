@@ -652,8 +652,23 @@ export class NodeStorage{
         const copy = copyKey ? await transferCache.get(copyKey) : null
         if (copy) headers['if-none-match'] = copy.etag
         let da: Response
-        const manifest = copy && copy.data.length >= MIN_DELTA_BYTES ? makeManifest(copy.data, readHash) : null
-        if (manifest) {
+        let probed: Response | null = null
+        if (copy?.revision) {
+            probed = await this.authFetch('/api/read', { method: 'GET', cache: 'no-store', headers: {
+                ...headers, 'x-read-check-only': '1', 'if-read-revision': copy.revision,
+            } })
+            if (probed.status === 304) {
+                if (isDatabase) this._lastDbEtag = copy.etag
+                const next = probed.headers.get('x-read-revision')
+                if (next && next !== copy.revision) await transferCache.updateRevision?.(copyKey!, copy.etag, next)
+                return Buffer.from(copy.data)
+            }
+            // Old servers ignore the probe header and return a normal body.
+            // Errors are handled normally, never masked by a local copy.
+            if (!probed.ok || !probed.headers.has('x-read-version-check')) da = probed
+        }
+        const manifest = !da && copy && copy.data.length >= MIN_DELTA_BYTES ? makeManifest(copy.data, readHash) : null
+        if (!da && manifest) {
             const text = JSON.stringify(manifest)
             const deltaHeaders = { ...headers, 'content-type': 'application/json' }
             let body: BodyInit = text
@@ -665,11 +680,13 @@ export class NodeStorage{
             if (da.status === 404 || da.status === 405) {
                 da = await this.authFetch('/api/read', { method: 'GET', headers, cache: 'no-store' })
             }
-        } else {
+        } else if (!da) {
             da = await this.authFetch('/api/read', { method: 'GET', headers, cache: 'no-store' })
         }
         if (da.status === 304 && copy) {
             if (isDatabase) this._lastDbEtag = copy.etag
+            const revision = da.headers.get('x-read-revision')
+            if (revision) await transferCache.updateRevision?.(copyKey!, copy.etag, revision)
             return Buffer.from(copy.data)
         }
         if(da.status < 200 || da.status >= 300){
@@ -703,7 +720,7 @@ export class NodeStorage{
             return null
         }
         const copyEtag = etag ?? da.headers.get('x-storage-etag')
-        if (copyKey && copyEtag) await transferCache.put(copyKey, copyEtag, new Uint8Array(data))
+        if (copyKey && copyEtag) await transferCache.put(copyKey, copyEtag, new Uint8Array(data), da.headers.get('x-read-revision') ?? undefined)
 
         return data
     }
@@ -1119,7 +1136,7 @@ export class NodeStorage{
         let da = await this.authFetch('/api/plugin-storage/sync', {
             method: 'POST', cache: 'no-store',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ versions, readDelta: true }),
+            body: JSON.stringify({ versions, readDelta: true, revisions: (await transferCache.revisions?.(prefix) ?? []).slice(0, 100_000) }),
         })
         let delta = true
         // Old servers keep working during a rolling upgrade.
@@ -1139,11 +1156,11 @@ export class NodeStorage{
             const readDelta = delta && row?.[1]?.read === true
             if (complete || !Array.isArray(row) || typeof row[0] !== 'string' ||
                 (typeof row[1] !== 'string' && !(delta && row[1] === null) && !readDelta) ||
-                (delta && typeof row[2] !== 'string')) throw new Error('Invalid plugin sync entry')
-            const [key, text, etag] = row
+                (delta && typeof row[2] !== 'string' && !(row[2] === null && typeof row[3] === 'string'))) throw new Error('Invalid plugin sync entry')
+            const [key, text, etag, revision] = row
             if (text === null || readDelta) {
                 const copy = !readDelta ? await transferCache.get(prefix + key) : null
-                if (copy?.etag === etag) {
+                if (copy && (revision ? copy.revision === revision : copy.etag === etag)) {
                     onEntry(key, new TextDecoder().decode(copy.data))
                 } else {
                     // Eviction/quota/another tab can remove a copy after the
@@ -1155,7 +1172,7 @@ export class NodeStorage{
                 }
             } else {
                 onEntry(key, text)
-                if (delta) await transferCache.put(prefix + key, etag, encoder.encode(text))
+                if (delta) await transferCache.put(prefix + key, etag, encoder.encode(text), revision)
             }
         }
         try {
