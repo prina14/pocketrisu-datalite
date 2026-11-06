@@ -4,6 +4,9 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 const { createChunkStore } = require('./chunkStore.cjs');
+const { getMemoryProfile, applySqliteMemoryProfile } = require('./memory-profile.cjs');
+
+const memoryProfile = getMemoryProfile();
 
 const saveDir = path.join(process.cwd(), 'save');
 if (!fs.existsSync(saveDir)) {
@@ -22,10 +25,8 @@ const db = new Database(dbPath);
 // WAL mode: better concurrent read performance, single-writer
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
-db.pragma('cache_size = -64000');       // 64 MB (default 2 MB) — reduce disk I/O for large blobs
-db.pragma('temp_store = MEMORY');       // keep temp tables in RAM
+applySqliteMemoryProfile(db, memoryProfile);
 db.pragma('busy_timeout = 5000');       // wait up to 5 s on lock contention
-db.pragma('mmap_size = 268435456');     // 256 MB memory-mapped I/O for faster reads
 // Cap WAL file size after a reset checkpoint. Without this, a one-time spike
 // (backup import, VACUUM, large asset upload) leaves the -wal file permanently
 // at its peak size since RESTART/TRUNCATE rewind the writer but never shrink
@@ -247,6 +248,7 @@ function clearEntities() {
 
 module.exports = {
     db,
+    memoryProfile,
     // KV
     kvGet, kvSet, kvDel, kvList, kvDelPrefix, kvListWithSizes, kvSize, kvGetUpdatedAt, kvCopyValue,
     kvGetReadRevision,

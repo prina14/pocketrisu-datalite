@@ -27,7 +27,7 @@ const getVips = () => {
 }
 const { kvGet, kvSet, kvDel, kvList,
         kvDelPrefix, kvListWithSizes, kvSize, kvGetUpdatedAt, kvGetReadRevision, kvCopyValue, clearEntities, checkpointWal,
-        gcChunks, reclaimableChunkBytes, isDbBlobChunked, snapshotFootprint, db: sqliteDb } = require('./db.cjs');
+        gcChunks, reclaimableChunkBytes, isDbBlobChunked, snapshotFootprint, memoryProfile, db: sqliteDb } = require('./db.cjs');
 const {
     addLogBatch, queryLogs, clearLogs, countLogs,
     logger, installProcessHandlers, expressErrorMiddleware,
@@ -55,6 +55,7 @@ const { Readable, Transform } = require('stream');
 
 // Install process-level error handlers before any other init so early crashes get logged.
 installProcessHandlers();
+logger.info(`[Memory] ${memoryProfile.name} profile: SQLite cache ${memoryProfile.sqliteCacheKiB} KiB, mmap ${memoryProfile.sqliteMmapBytes} bytes, temporary storage ${memoryProfile.sqliteTempStore}`);
 
 // Node.js version check
 const [nodeMajor] = process.version.slice(1).split('.').map(Number);
@@ -140,7 +141,7 @@ const DB_HEX_KEY = Buffer.from('database/database.bin', 'utf-8').toString('hex')
 const assetManifestStore = createAssetManifestStore(sqliteDb, {
     maxCacheBytes: process.env.POCKETRISU_ASSET_MANIFEST_CACHE_BYTES
         ? Number(process.env.POCKETRISU_ASSET_MANIFEST_CACHE_BYTES)
-        : undefined,
+        : memoryProfile.assetManifestCacheBytes,
 });
 
 // ─── Persist failure tracking (Stage 1 visibility) ───────────────────────────
@@ -4409,7 +4410,25 @@ async function readStorage(req, res, next) {
             return res.status(200).end();
         }
         let value = null;
-        if (key.startsWith('inlay/')) {
+        if (isDb) {
+            // The cached client view already excludes chat bodies. Reading the
+            // full on-disk blob here used to allocate it only to discard it
+            // immediately, and a cold load then read the same blob a second time.
+            // Check existence through revision metadata, never through the BLOB.
+            if (!kvGetReadRevision(key)) return res.send();
+            try {
+                // Serialize cold initialization with writes; the loader checks
+                // again after queueing and reads the full DB only when needed.
+                if (!dbCache[filePath]) {
+                    const loaded = await queueStorageOperation(() => loadDbCacheIfMissing({ createBackup: true }));
+                    if (!loaded) return res.send();
+                }
+                value = Buffer.from(encodeRisuSaveLegacy(dbCache[filePath]));
+            } catch (e) {
+                logger.error('[Read] Failed to strip chats from database.bin', e);
+                return next(e);
+            }
+        } else if (key.startsWith('inlay/')) {
             value = await readInlayAssetPayload(key.slice('inlay/'.length));
         } else if (key.startsWith('inlay_info/')) {
             value = await readInlayInfoPayload(key.slice('inlay_info/'.length));
@@ -4422,22 +4441,7 @@ async function readStorage(req, res, next) {
         } else {
             // Strip chat payloads and asset manifests from database.bin — the
             // client gets stubs and descriptors only.
-            if (key === 'database/database.bin') {
-                try {
-                    // Cold load runs under the storage queue so it cannot
-                    // race a cold /api/patch (see loadDbCacheIfMissing). A
-                    // warm cache is served directly without queueing, so a
-                    // read can never re-activate a superseded manifest.
-                    if (!dbCache[filePath]) {
-                        await queueStorageOperation(() => loadDbCacheIfMissing({ createBackup: true }));
-                    }
-                    value = Buffer.from(encodeRisuSaveLegacy(dbCache[filePath]));
-                } catch (e) {
-                    // Log the Error itself (not just e.message) so logger.*
-                    // tags it and the Express middleware won't re-log after next().
-                    logger.error('[Read] Failed to strip chats from database.bin', e);
-                    return next(e);
-                }
+            if (isDb) {
                 dbEtag = computeBufferEtag(value);
                 res.setHeader('x-db-etag', dbEtag);
                 res.setHeader('x-read-revision', readRevision(key));
@@ -8622,11 +8626,12 @@ app.post('/api/db/optimize', async (req, res, next) => {
             // temp_store. With the session-wide temp_store=MEMORY that copy
             // lands in RAM and OOM-kills the process on multi-GB DBs, so spill
             // it to disk (SQLITE_TMPDIR = save dir) for the duration.
+            const previousTempStore = sqliteDb.pragma('temp_store', { simple: true });
             sqliteDb.pragma('temp_store = FILE');
             try {
                 sqliteDb.exec('VACUUM');
             } finally {
-                sqliteDb.pragma('temp_store = MEMORY');
+                sqliteDb.pragma(`temp_store = ${previousTempStore}`);
             }
             // VACUUM streams the whole DB through the WAL; without this checkpoint the
             // -wal file stays inflated until the next 5-min background TRUNCATE.

@@ -6,7 +6,7 @@
 
 > A custom build of PocketRisu focused on reducing mobile-web data transfer through persistent caching, conditional reads, and content-defined chunk synchronization.
 
-- **커스텀 버전:** `v1.17.0-datalite.2` — PocketRisu DataLite 2
+- **커스텀 버전:** `v1.17.0-datalite.3` — PocketRisu DataLite 3
 - **원본 기반:** [PocketRisu v1.17.0](https://github.com/PocketRisu/PocketRisu), commit `40851fc9831856a36cb5c14799c1f501f32dc133`
 - **원본과의 관계:** PocketRisu의 커스텀 빌드이며, 원본 프로젝트의 공식 배포판과 구분됩니다.
 - **라이선스:** [GPL-3.0](LICENSE)
@@ -50,6 +50,7 @@
 
 - [Linux x64 포터블 / Oracle 서버 설치 안내](docs/ko/datalite-portable.md)
 - [데이터 절약 기능과 확인 방법](docs/ko/data-lite.md)
+- [1GB 서버의 메모리 최적화](docs/ko/server-memory.md)
 - [개발자용 기술 패치 노트](docs/ko/datalite-patch-notes.md)
 - [기기 전환 개선 1단계: 서버 작업 안내](docs/ko/multi-device-step1.md)
 - [커스텀 Releases](https://github.com/prina14/pocketrisu-datalite/releases)
