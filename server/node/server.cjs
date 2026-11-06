@@ -9100,9 +9100,10 @@ app.post('/api/self-update', async (req, res) => {
             throw new Error(`No release asset for ${process.platform}-${process.arch}`);
         }
 
-        // 2. Download
-        tmpDir = path.join(os.tmpdir(), `risu-update-${Date.now()}`);
-        await fs.mkdir(tmpDir, { recursive: true });
+        // 2. Stage beside the installation, independently of .update-tmp's
+        // rollback files. On small Linux servers os.tmpdir() is often tmpfs:
+        // storing the archive and extracted package there consumes RAM/swap.
+        tmpDir = await fs.mkdtemp(path.join(process.cwd(), '.risu-update-'));
         const archivePath = path.join(tmpDir, assetInfo.filename);
 
         send('downloading', 0, 'Starting download...');
@@ -9210,6 +9211,7 @@ app.post('/api/self-update', async (req, res) => {
 
         // Keep set — matches updater.cjs + user data/config that must survive updates
         const keep = new Set(['save', 'backups', '.installed-version', '.installed-manifest', '.update-tmp', 'scripts', '.env', '.npmrc', '.portable']);
+        keep.add(path.basename(tmpDir));
         if (isWin) keep.add('bin');
         const customBackupKeep = customBackupKeepEntry(appDir);
         if (customBackupKeep && !keep.has(customBackupKeep)) {
