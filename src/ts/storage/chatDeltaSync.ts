@@ -1,9 +1,13 @@
 import type { Chat } from './database.svelte'
 import { messageFingerprints, prefixFingerprint } from './chatFingerprint'
+import rfdc from 'rfdc'
+import type { ChatCopyStore } from './chatCopyStore'
+export type { ChatCopyStore } from './chatCopyStore'
+export { indexedDbChatCopies } from './chatCopyStore'
 
-// Chat delta sync — transfer only what changed for long chats.
+// Chat delta sync — transfer only what changed for cached chats.
 //
-// Loading: the browser keeps a copy of recently opened long chats in
+// Loading: the browser keeps a copy of opened or successfully saved chats in
 // IndexedDB. Opening one sends the copy's message count and prefix
 // fingerprint; the server returns only the messages after it when its own
 // first messages fingerprint the same, otherwise the whole chat as before.
@@ -24,37 +28,47 @@ export interface ChatDeltaTransport {
     saveChatContentDelta(chaId: string, chatIndex: number, chatId: string, chat: any, base: { count: number, fp: string } | null): Promise<'ok' | 'base-mismatch'>
 }
 
-export interface ChatCopyStore {
-    get(key: string): Promise<Chat | null>
-    put(key: string, chat: Chat): Promise<void>
+// Native cloning handles plain fetch results; rfdc also handles Svelte proxies.
+const cloneReactive = rfdc({ circles: true })
+function snapshotChat(chat: Chat): Chat | null {
+    try { return structuredClone(chat) } catch {
+        try { return cloneReactive(chat) } catch { return null }
+    }
 }
-
-// Only long chats are worth a local copy; short ones load fast anyway.
-export const CACHE_MIN_MESSAGES = 40
-export const CACHE_MAX_ENTRIES = 24
 
 function chatCopyKey(chaId: string, chatId: string) {
     return `${chaId}|${chatId}`
 }
 
 function isUsableCopy(chat: any): chat is Chat {
-    return !!chat && typeof chat === 'object' && Array.isArray(chat.message) && chat.message.length > 0 && !chat._placeholder
+    return !!chat && typeof chat === 'object' && Array.isArray(chat.message) && !chat._placeholder && !chat._stub
 }
 
 export function createChatDeltaSync(transport: ChatDeltaTransport, copies: ChatCopyStore) {
     const serverFingerprints = new Map<string, string[]>()
+    // Serialize local writes too: a slow older fetch must not overwrite the
+    // snapshot of a later acknowledged save. Cache failures remain optional.
+    const copyWrites = new Map<string, Promise<void>>()
+    function persistCopy(key: string, snapshot: Chat): Promise<void> {
+        const run = (copyWrites.get(key) ?? Promise.resolve())
+            .then(() => copies.put(key, snapshot)).catch(() => {})
+        copyWrites.set(key, run)
+        void run.then(() => { if (copyWrites.get(key) === run) copyWrites.delete(key) })
+        return run
+    }
 
     async function fetchChat(chaId: string, chatIndex: number, chatId: string): Promise<Chat | null> {
         const key = chatCopyKey(chaId, chatId)
         let copy: Chat | null = null
         try {
+            await copyWrites.get(key)
             const stored = await copies.get(key)
             if (isUsableCopy(stored)) copy = stored
         } catch {
             copy = null
         }
         const copyFingerprints = copy ? messageFingerprints(copy.message) : null
-        const base = copy && copyFingerprints
+        const base = copy && copy.message.length > 0 && copyFingerprints
             ? { count: copy.message.length, fp: prefixFingerprint(copyFingerprints, copy.message.length) }
             : null
 
@@ -71,16 +85,9 @@ export function createChatDeltaSync(transport: ChatDeltaTransport, copies: ChatC
         }
         serverFingerprints.set(key, fingerprints)
 
-        if ((full.message?.length ?? 0) >= CACHE_MIN_MESSAGES) {
-            // Clone now, while `full` is still a plain object (it becomes
-            // reactive state once the caller applies it).
-            let snapshot: Chat | null = null
-            try {
-                snapshot = structuredClone(full)
-            } catch {
-                snapshot = null
-            }
-            if (snapshot) void copies.put(key, snapshot).catch(() => {})
+        if (isUsableCopy(full)) {
+            const snapshot = snapshotChat(full)
+            if (snapshot) void persistCopy(key, snapshot)
         }
         return full
     }
@@ -108,7 +115,11 @@ export function createChatDeltaSync(transport: ChatDeltaTransport, copies: ChatC
 
     async function saveChatNow(chaId: string, chatIndex: number, chatId: string, chat: Chat): Promise<void> {
         const key = chatCopyKey(chaId, chatId)
-        const messages = chat.message ?? []
+        // Freeze exactly what this request sends before any await. Streaming
+        // may keep mutating the UI while gzip/network/fallback is in flight.
+        const snapshot = snapshotChat(chat)
+        const outgoing = snapshot ?? chat
+        const messages = outgoing.message ?? []
         // Fingerprints, delta body and encoding are all taken synchronously
         // below, so they describe the same chat content even if it keeps
         // changing (streaming) while the request is in flight.
@@ -120,97 +131,24 @@ export function createChatDeltaSync(transport: ChatDeltaTransport, copies: ChatC
             while (shared < max && known[shared] === fingerprints[shared]) shared++
         }
         if (shared > 0) {
-            const delta = { ...chat, message: messages.slice(shared) }
+            const delta = { ...outgoing, message: messages.slice(shared) }
             const outcome = await transport.saveChatContentDelta(chaId, chatIndex, chatId, delta, {
                 count: shared,
                 fp: prefixFingerprint(fingerprints, shared),
             })
             if (outcome === 'ok') {
                 serverFingerprints.set(key, fingerprints)
+                if (snapshot && isUsableCopy(snapshot)) await persistCopy(key, snapshot)
                 return
             }
             // The server holds something else (another device, a server-side
             // write): fall through to a full save, as before delta sync.
         }
-        await transport.saveChatContentDelta(chaId, chatIndex, chatId, chat, null)
+        const outcome = await transport.saveChatContentDelta(chaId, chatIndex, chatId, outgoing, null)
+        if (outcome !== 'ok') throw new Error('Server did not accept the full chat save')
         serverFingerprints.set(key, fingerprints)
+        if (snapshot && isUsableCopy(snapshot)) await persistCopy(key, snapshot)
     }
 
     return { fetchChat, saveChat }
-}
-
-// ── IndexedDB copy store ────────────────────────────────────────────────────
-
-const DB_NAME = 'pocketrisu-chat-copies'
-const STORE = 'chats'
-
-let dbPromise: Promise<IDBDatabase> | null = null
-
-function openCopyDb(): Promise<IDBDatabase> {
-    if (dbPromise) return dbPromise
-    dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
-        if (typeof indexedDB === 'undefined') {
-            reject(new Error('IndexedDB unavailable'))
-            return
-        }
-        const request = indexedDB.open(DB_NAME, 1)
-        request.onupgradeneeded = () => {
-            const db = request.result
-            if (!db.objectStoreNames.contains(STORE)) {
-                const store = db.createObjectStore(STORE, { keyPath: 'key' })
-                store.createIndex('usedAt', 'usedAt')
-            }
-        }
-        request.onsuccess = () => resolve(request.result)
-        request.onerror = () => reject(request.error)
-    })
-    dbPromise.catch(() => { dbPromise = null })
-    return dbPromise
-}
-
-function done(tx: IDBTransaction): Promise<void> {
-    return new Promise((resolve, reject) => {
-        tx.oncomplete = () => resolve()
-        tx.onerror = () => reject(tx.error)
-        tx.onabort = () => reject(tx.error)
-    })
-}
-
-export const indexedDbChatCopies: ChatCopyStore = {
-    async get(key) {
-        const db = await openCopyDb()
-        const tx = db.transaction(STORE, 'readwrite')
-        const store = tx.objectStore(STORE)
-        const record = await new Promise<any>((resolve, reject) => {
-            const request = store.get(key)
-            request.onsuccess = () => resolve(request.result)
-            request.onerror = () => reject(request.error)
-        })
-        if (record) store.put({ ...record, usedAt: Date.now() })
-        await done(tx)
-        return record?.chat ?? null
-    },
-    async put(key, chat) {
-        const db = await openCopyDb()
-        const tx = db.transaction(STORE, 'readwrite')
-        const store = tx.objectStore(STORE)
-        store.put({ key, chat, usedAt: Date.now() })
-        // Evict least recently used copies beyond the cap.
-        const countRequest = store.count()
-        countRequest.onsuccess = () => {
-            let excess = countRequest.result - CACHE_MAX_ENTRIES
-            if (excess <= 0) return
-            const cursorRequest = store.index('usedAt').openCursor()
-            cursorRequest.onsuccess = () => {
-                const cursor = cursorRequest.result
-                if (!cursor || excess <= 0) return
-                if (cursor.primaryKey !== key) {
-                    cursor.delete()
-                    excess--
-                }
-                cursor.continue()
-            }
-        }
-        await done(tx)
-    },
 }

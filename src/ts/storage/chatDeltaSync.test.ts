@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
-import { CACHE_MIN_MESSAGES, createChatDeltaSync, type ChatCopyStore, type ChatDeltaTransport } from './chatDeltaSync'
+import { createChatDeltaSync, type ChatCopyStore, type ChatDeltaTransport } from './chatDeltaSync'
 import { messageFingerprints, prefixFingerprint } from './chatFingerprint'
 
 const msg = (i: number, data = `message ${i}`) => ({ role: (i % 2 ? 'char' : 'user') as 'char' | 'user', data, chatId: `m${i}`, time: i })
@@ -36,8 +36,21 @@ function memoryCopies(): ChatCopyStore & { map: Map<string, any> } {
 const settle = () => new Promise((r) => setTimeout(r, 0))
 
 describe('chat delta sync — loading', () => {
-    test('first open fetches the whole chat and keeps a copy of long chats', async () => {
-        const server = fakeServer(chatOf(CACHE_MIN_MESSAGES + 10))
+    test.each([0, 1, 12, 39, 40])('keeps a full copy with %i messages, including metadata', async n => {
+        const server = fakeServer(chatOf(n, { note: 'keep metadata even when empty' }))
+        const copies = memoryCopies()
+        await createChatDeltaSync(server.transport, copies).fetchChat('char', 0, 'chat')
+        await settle()
+        expect(copies.map.get('char|chat')).toEqual(server.stored)
+        await createChatDeltaSync(server.transport, copies).fetchChat('char', 0, 'chat')
+        const sentBase = (server.transport.fetchChatContentDelta as any).mock.calls.at(-1)[3]
+        // Empty copies are persisted too; the existing server prefix protocol
+        // accepts only positive message counts, so these still use a full GET.
+        expect(sentBase?.count ?? 0).toBe(n)
+    })
+
+    test('first open fetches the whole chat and keeps a copy', async () => {
+        const server = fakeServer(chatOf(50))
         const copies = memoryCopies()
         const sync = createChatDeltaSync(server.transport, copies)
         const chat = await sync.fetchChat('char', 0, 'chat')
@@ -78,6 +91,100 @@ describe('chat delta sync — loading', () => {
 })
 
 describe('chat delta sync — saving', () => {
+    test('a saved short chat is available to the next page load with its latest prefix', async () => {
+        const server = fakeServer(chatOf(2))
+        const copies = memoryCopies()
+        const sync = createChatDeltaSync(server.transport, copies)
+        const chat = await sync.fetchChat('char', 0, 'chat')
+        chat!.message.push(msg(2))
+        await sync.saveChat('char', 0, 'chat', chat!)
+        expect(copies.map.get('char|chat')).toEqual(server.stored)
+        const reopened = await createChatDeltaSync(server.transport, copies).fetchChat('char', 0, 'chat')
+        expect((server.transport.fetchChatContentDelta as any).mock.calls.at(-1)[3].count).toBe(3)
+        expect(reopened).toEqual(server.stored)
+    })
+
+    test.each([false, true])('in-flight UI edits never enter the acknowledged cache (fallback=%s)', async fallback => {
+        const server = fakeServer(chatOf(2))
+        const copies = memoryCopies()
+        const sync = createChatDeltaSync(server.transport, copies)
+        const loaded = await sync.fetchChat('char', 0, 'chat')
+        // Like Svelte state, this proxy cannot be passed to structuredClone.
+        const chat = new Proxy(loaded!, {})
+        chat.note = 'sent'
+        chat.message.push(msg(2))
+        const expected = structuredClone(loaded)
+        let release!: () => void
+        const gate = new Promise<void>(resolve => { release = resolve })
+        const save = server.transport.saveChatContentDelta as any
+        const real = save.getMockImplementation()
+        save.mockImplementationOnce(async (...args: any[]) => {
+            await gate
+            return fallback ? 'base-mismatch' : real(...args)
+        })
+        const pending = sync.saveChat('char', 0, 'chat', chat)
+        chat.note = 'not sent yet'
+        chat.message[0].data = 'not sent either'
+        release()
+        await pending
+        expect(server.stored).toEqual(expected)
+        expect(copies.map.get('char|chat')).toEqual(expected)
+        await sync.saveChat('char', 0, 'chat', chat)
+        expect(server.stored).toEqual(loaded)
+        expect(copies.map.get('char|chat')).toEqual(loaded)
+    })
+
+    test('failed network saves leave the previous cached copy intact', async () => {
+        const server = fakeServer(chatOf(2))
+        const copies = memoryCopies()
+        const sync = createChatDeltaSync(server.transport, copies)
+        const chat = await sync.fetchChat('char', 0, 'chat')
+        await settle()
+        const previous = structuredClone(copies.map.get('char|chat'))
+        chat!.note = 'unsaved'
+        ;(server.transport.saveChatContentDelta as any).mockRejectedValueOnce(new Error('network'))
+        await expect(sync.saveChat('char', 0, 'chat', chat!)).rejects.toThrow('network')
+        expect(copies.map.get('char|chat')).toEqual(previous)
+    })
+
+    test('a rejected full save never enters the cache', async () => {
+        const server = fakeServer(chatOf(0))
+        const copies = memoryCopies()
+        ;(server.transport.saveChatContentDelta as any).mockResolvedValueOnce('base-mismatch')
+        const sync = createChatDeltaSync(server.transport, copies)
+        await expect(sync.saveChat('char', 0, 'chat', chatOf(1))).rejects.toThrow('did not accept')
+        expect(copies.map.size).toBe(0)
+    })
+
+    test('a delayed fetch cache write cannot overwrite a later acknowledged save', async () => {
+        const server = fakeServer(chatOf(2, { note: 'old' }))
+        const copies = memoryCopies()
+        const originalPut = copies.put
+        let release!: () => void
+        const gate = new Promise<void>(resolve => { release = resolve })
+        copies.put = async (key, chat) => {
+            if (chat.note === 'old') await gate
+            await originalPut(key, chat)
+        }
+        const sync = createChatDeltaSync(server.transport, copies)
+        const chat = await sync.fetchChat('char', 0, 'chat')
+        chat!.note = 'new'
+        const saved = sync.saveChat('char', 0, 'chat', chat!)
+        await settle()
+        expect(server.stored.note).toBe('new')
+        release()
+        await saved
+        expect(copies.map.get('char|chat').note).toBe('new')
+    })
+
+    test('a cache failure never turns a successful server save into an error', async () => {
+        const server = fakeServer(chatOf(2))
+        const broken: ChatCopyStore = { get: async () => null, put: async () => { throw new Error('quota') } }
+        const sync = createChatDeltaSync(server.transport, broken)
+        await expect(sync.saveChat('char', 0, 'chat', chatOf(3))).resolves.toBeUndefined()
+        expect(server.stored.message).toHaveLength(3)
+    })
+
     async function opened(n = 60) {
         const server = fakeServer(chatOf(n))
         const sync = createChatDeltaSync(server.transport, memoryCopies())

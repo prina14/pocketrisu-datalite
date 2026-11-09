@@ -6,7 +6,7 @@
 
 > A custom build of PocketRisu focused on reducing mobile-web data transfer through persistent caching, conditional reads, and content-defined chunk synchronization.
 
-- **커스텀 버전:** `v1.17.0-datalite.4` — PocketRisu DataLite 4
+- **커스텀 버전:** `v1.17.0-datalite.5` — PocketRisu DataLite 5
 - **원본 기반:** [PocketRisu v1.17.0](https://github.com/PocketRisu/PocketRisu), commit `40851fc9831856a36cb5c14799c1f501f32dc133`
 - **원본과의 관계:** PocketRisu의 커스텀 빌드이며, 원본 프로젝트의 공식 배포판과 구분됩니다.
 - **라이선스:** [GPL-3.0](LICENSE)
@@ -37,7 +37,7 @@
 
 **특정 테스트 데이터의 결과이며 전체 앱 트래픽 감소율을 보장하는 수치는 아닙니다.** HTTP 헤더·인증·정적 앱 파일·이미지 등의 통신은 제외했습니다. 최초 접속, 캐시 삭제, 새 앱 빌드, 미디어 로딩, 대부분의 내용이 바뀐 경우에는 더 많은 데이터를 받을 수 있습니다.
 
-캐시는 최대 512 MiB를 보관합니다. 브라우저 저장 공간이 부족하거나 사본이 없으면 네트워크 읽기로 동작합니다. V2 플러그인은 기존 동기 API를 유지하기 위해 실행 전 전체 값을 메모리에 준비합니다. 전송량 최적화가 V2의 메모리 구조까지 바꾸는 것은 아닙니다.
+메인 DB·플러그인 전송 캐시는 최대 512 MiB를 보관합니다. 채팅은 열거나 서버 저장에 성공한 내용을 메시지 수·용량에 관계없이 기본 캐시하며, 브라우저 저장 한도에 걸리면 오래 사용하지 않은 채팅 사본부터 정리합니다. 사본이 없거나 캐시를 사용할 수 없으면 네트워크 읽기로 동작합니다. V2 플러그인은 기존 동기 API를 유지하기 위해 실행 전 전체 값을 메모리에 준비합니다. 전송량 최적화가 V2의 메모리 구조까지 바꾸는 것은 아닙니다.
 
 ## 적용 범위
 
@@ -50,6 +50,7 @@
 
 - [Linux x64 포터블 / Oracle 서버 설치 안내](docs/ko/datalite-portable.md)
 - [데이터 절약 기능과 확인 방법](docs/ko/data-lite.md)
+- [모든 채팅의 기본 캐시와 저장 후 갱신](docs/ko/chat-cache.md)
 - [1GB 서버의 메모리 최적화](docs/ko/server-memory.md)
 - [개발자용 기술 패치 노트](docs/ko/datalite-patch-notes.md)
 - [기기 전환 개선 1단계: 서버 작업 안내](docs/ko/multi-device-step1.md)
