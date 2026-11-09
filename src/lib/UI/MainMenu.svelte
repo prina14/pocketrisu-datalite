@@ -17,6 +17,7 @@
     import { isSecureContext } from "src/ts/secureContext";
     import { openSettings, SettingsRoute } from "src/ts/routing";
     import ShButton from "./GUI/ShButton.svelte";
+    import CacheUsageCard from './CacheUsageCard.svelte';
 
     let realmOpen = $state(!DBState.db.hideRealm);
 
@@ -71,6 +72,7 @@
     {/if}
     <div class="w-full flex p-4 flex-col text-textcolor max-w-4xl">
       {#if !$OpenRealmStore}
+      <CacheUsageCard />
       {#if !isSecureContext}
         <div class="mt-4 w-full bg-yellow-900/30 border border-yellow-700/40 rounded-md px-4 py-3 flex items-center justify-between gap-3 flex-wrap text-yellow-300">
           <div class="flex items-start gap-2.5 min-w-0 flex-1">

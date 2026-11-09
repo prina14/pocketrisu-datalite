@@ -1,6 +1,21 @@
 import { helpKo } from "./help.ko";
 
 export const languageKorean = {
+  cacheUsageTitle: "이 기기의 캐시",
+  cacheUsageDevice: "브라우저 저장 공간",
+  cacheUsageRefresh: "저장 공간 사용량 새로고침",
+  cacheUsageLoading: "저장 공간 확인 중…",
+  cacheUsageUsed: "이 사이트의 사용량",
+  cacheUsageKnown: "확인된 캐시 사용량 · 약",
+  cacheUsageRemaining: "한도 내 남은 공간",
+  cacheUsageQuotaLabel: "브라우저 저장 한도",
+  cacheUsageQuotaUnknown: "저장 한도 확인 불가",
+  cacheUsageMeter: "브라우저 저장 공간 사용률",
+  cacheUsageNearlyFull: "저장 공간이 거의 찼습니다",
+  cacheUsageEstimateNote: "캐시를 포함한 이 사이트의 저장 공간 추정치입니다. 실제 기기의 여유 공간과 다를 수 있습니다.",
+  cacheUsageFallbackNote: "채팅과 앱 데이터 사본의 추정치이며 새로고침 버튼으로 갱신할 수 있습니다. 이미지·앱 파일 캐시는 포함되지 않으며 전체 저장 한도는 확인할 수 없습니다.",
+  cacheUsageUnavailable: "이 브라우저에서는 저장 공간을 확인할 수 없습니다. 브라우저의 사이트 저장 공간 설정을 확인해 주세요.",
+  cacheUsageRefreshFailed: "사용량을 새로고치지 못했습니다. 잠시 후 다시 시도해 주세요.",
   serverActivityWorking: "서버에서 작업 중입니다…",
   serverActivityUnavailable: "서버 작업 상태를 확인할 수 없습니다",
   formating: {

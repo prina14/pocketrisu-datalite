@@ -1,6 +1,21 @@
 import { helpEn } from "./help.en";
 
 export const languageEnglish = {
+    cacheUsageTitle: "Cache on this device",
+    cacheUsageDevice: "Browser storage",
+    cacheUsageRefresh: "Refresh storage usage",
+    cacheUsageLoading: "Checking storage usage…",
+    cacheUsageUsed: "Site storage used",
+    cacheUsageKnown: "Known cache usage · approximate",
+    cacheUsageRemaining: "Remaining within the limit",
+    cacheUsageQuotaLabel: "Browser storage limit",
+    cacheUsageQuotaUnknown: "Storage limit unavailable",
+    cacheUsageMeter: "Browser storage usage",
+    cacheUsageNearlyFull: "Storage is nearly full",
+    cacheUsageEstimateNote: "Estimated storage used by this site, including caches. This may differ from your device’s free space.",
+    cacheUsageFallbackNote: "Estimated chat and app-data copies only; refresh manually to update. Image and app-file caches are not included, and the browser’s total storage limit is unavailable.",
+    cacheUsageUnavailable: "Storage usage is unavailable in this browser. Check your browser’s site storage settings.",
+    cacheUsageRefreshFailed: "Could not refresh storage usage. Try again in a moment.",
     serverActivityWorking: "The server is working…",
     serverActivityUnavailable: "Unable to check server activity",
     formating: {
