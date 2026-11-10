@@ -55,6 +55,48 @@ test('revision metadata updates preserve the body and reject a mismatched valida
     expect(await copies.versions('plugin:')).toEqual([['a', 'hash']])
 })
 
+test('combined validators use one metadata scan without reading cached bodies', async () => {
+    const { transferCache: copies } = await import('./transferCache')
+    await copies.put('plugin:a', 'h1', new Uint8Array([1]), 'r1')
+    await copies.put('plugin:b', 'h2', new Uint8Array([2]))
+    await copies.put('db:other', 'excluded', new Uint8Array([3]), 'excluded')
+    const db = await openCacheDb()
+    const proto = Object.getPrototypeOf(db.transaction('versions').objectStore('versions'))
+    const originalCursor = proto.openCursor
+    const scannedStores: string[] = []
+    vi.spyOn(proto, 'openCursor').mockImplementation(function(this: IDBObjectStore, ...args: any[]) {
+        scannedStores.push(this.name)
+        return originalCursor.apply(this, args)
+    })
+    const get = vi.spyOn(proto, 'get')
+    expect(await copies.validators!('plugin:')).toEqual({
+        versions: [['a', 'h1'], ['b', 'h2']], revisions: [['a', 'r1']],
+    })
+    expect(scannedStores).toEqual(['versions'])
+    expect(get).not.toHaveBeenCalled()
+    expect(await copies.validators!('missing:')).toEqual({ versions: [], revisions: [] })
+    db.close()
+})
+
+test('combined validators fall back to empty lists when IndexedDB is unavailable', async () => {
+    vi.stubGlobal('indexedDB', undefined)
+    const { transferCache: copies } = await import('./transferCache')
+    expect(await copies.validators!('plugin:')).toEqual({ versions: [], revisions: [] })
+})
+
+test('reports version metadata before the body resolves, within one consistent read transaction', async () => {
+    const { transferCache: copies } = await import('./transferCache')
+    await copies.put('db:test', 'hash', new Uint8Array(1024 * 1024), 'r1')
+    const events: string[] = []
+    const read = copies.get('db:test', version => {
+        events.push('version')
+        expect(version).toEqual({ etag: 'hash', revision: 'r1' })
+    }).then(copy => { events.push('body'); return copy })
+    expect((await read)?.data.byteLength).toBe(1024 * 1024)
+    expect(events).toEqual(['version', 'body'])
+    expect((await copies.get('db:test', () => { throw new Error('observer failed') }))?.etag).toBe('hash')
+})
+
 test('a quota failure is optional and does not advertise an uncommitted copy', async () => {
     const { transferCache: copies } = await import('./transferCache')
     await copies.put('plugin:old', 'old', new Uint8Array([1]))

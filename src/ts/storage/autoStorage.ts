@@ -4,6 +4,7 @@ import {
     type ExportBackupOptions,
     type AssetManifestDescriptor,
     type AssetManifestOperation,
+    type StorageReadOptions,
 } from "./nodeStorage"
 
 export class AutoStorage{
@@ -15,9 +16,10 @@ export class AutoStorage{
         await this.realStorage.setItem(key, value, etag)
         return null
     }
-    async getItem(key:string):Promise<Buffer> {
-        return await this.realStorage.getItem(key)
+    async getItem(key:string, options?: StorageReadOptions):Promise<Buffer> {
+        return await this.realStorage.getItem(key, options)
     }
+    flushDeferredCacheWrites() { return this.realStorage?.flushDeferredCacheWrites() ?? Promise.resolve() }
     async keys(prefix: string = ''):Promise<string[]>{
         await this.Init()
         return await this.realStorage.keys(prefix)

@@ -9,6 +9,7 @@ import { fetchPublicStats } from "./publicStats";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, DBState, LoadingStatusState, bootBackupPromptStore, accountImportBlocking } from "./stores.svelte";
 import { recordDbTransferSize } from "./transferSize";
 import { loadPlugins } from "./plugins/plugins.svelte";
+import * as pluginStorageStore from './plugins/pluginStorageStore';
 import { alertError, alertMd, waitAlert, alertConfirm, alertInput } from "./alert";
 import { characterURLImport } from "./characterCards";
 import { defaultJailbreak, defaultMainPrompt, oldJailbreak, oldMainPrompt } from "./storage/defaultPrompts";
@@ -32,7 +33,7 @@ import { registerModelDynamic } from "./model/modellist";
 import { initModelJobRecovery } from "./process/request/jobRecovery";
 import { convertStubsToPlaceholders } from "./storage/chatStorage";
 import { isChatStub, purgeUnsupportedGroupChats } from "./storage/database.svelte";
-import { beginStartupPhase, measureStartupPhase, readBootBackupReminderEnabled, scheduleAfterFirstPaint } from './startup';
+import { beginStartupPhase, measureStartupPhase, readBootBackupReminderEnabled, readDatabaseWithIndexPrefetch, scheduleAfterFirstPaint } from './startup';
 
 /**
  * Loads the application data.
@@ -46,8 +47,11 @@ export async function loadData() {
             // A started RisuAI account import will replace all data, so the
             // app shows only its screen until it ends. When the status cannot
             // be read the boot goes on; the server still refuses every write.
+            let importStatusChecked = false
             try {
-                if ((await measureStartupPhase('import-status', () => forageStorage.getRisuAccountImportStatus())).blocking) {
+                const importStatus = await measureStartupPhase('import-status', () => forageStorage.getRisuAccountImportStatus())
+                importStatusChecked = true
+                if (importStatus.blocking) {
                     accountImportBlocking.set(true)
                     finishStartup()
                     return
@@ -55,18 +59,28 @@ export async function loadData() {
             } catch (error) {
                 console.warn('[bootstrap] account import status failed:', error)
             }
+            await measureStartupPhase('storage-init', () => forageStorage.Init())
+            // Independent of the DB bytes: overlap this read with cache/network
+            // work, but keep the actual reminder at its existing pre-UI point.
+            const readBootReminder = () => measureStartupPhase('backup-reminder-config', () =>
+                readBootBackupReminderEnabled(() => forageStorage.createAuth(), fetchWithTimeout))
+            // A failed status/auth preflight can recover during getItem. In
+            // that case retain the old post-DB reminder read instead of
+            // treating an early unauthenticated answer as "disabled".
+            let bootReminderEnabled = importStatusChecked ? readBootReminder() : undefined
+
             let createdFreshDatabase = false
             {
-                await measureStartupPhase('storage-init', () => forageStorage.Init())
-
                 LoadingStatusState.text = "Loading Local Save File..."
-                let gotStorage: Uint8Array = await measureStartupPhase('database-read', () => forageStorage.getItem('database/database.bin')) as unknown as Uint8Array
-                LoadingStatusState.text = "Decoding Local Save File..."
-                if (checkNullish(gotStorage)) {
+                const gotStorage: Uint8Array = await readDatabaseWithIndexPrefetch(async () => {
+                    const stored = await measureStartupPhase('database-read', () => forageStorage.getItem('database/database.bin', { deferCacheWrite: true }))
+                    if (!checkNullish(stored)) return stored
                     createdFreshDatabase = true
-                    gotStorage = encodeRisuSaveLegacy({})
-                    await forageStorage.setItem('database/database.bin', gotStorage)
-                }
+                    const fresh = encodeRisuSaveLegacy({})
+                    await forageStorage.setItem('database/database.bin', fresh)
+                    return fresh
+                }, () => measureStartupPhase('plugins-index-prefetch', () => pluginStorageStore.init()))
+                LoadingStatusState.text = "Decoding Local Save File..."
                 try {
                     const decoded = await measureStartupPhase('database-decode', () => decodeRisuSave(gotStorage))
                     // setPatchSyncBaseline owns its defensive clone. Cloning at
@@ -130,10 +144,7 @@ export async function loadData() {
                     changeLanguage(mappedLanguage)
                 }
             }
-            // This read is independent of plugin initialization. Start it now,
-            // but keep any reminder prompt at the original pre-interactive point.
-            const bootReminderEnabled = measureStartupPhase('backup-reminder-config', () =>
-                readBootBackupReminderEnabled(() => forageStorage.createAuth(), fetchWithTimeout))
+            bootReminderEnabled ??= readBootReminder()
             LoadingStatusState.text = "Loading Plugins..."
             try {
                 await measureStartupPhase('plugins', () => loadPlugins())
@@ -217,6 +228,7 @@ export async function loadData() {
                 cleanChunks().catch(console.error)
             }, 5_000)
             scheduleAfterFirstPaint([
+                () => forageStorage.flushDeferredCacheWrites(),
                 requestStoragePersistence,
                 checkRisuUpdate,
                 fetchPublicStats,

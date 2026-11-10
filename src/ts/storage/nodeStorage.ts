@@ -10,7 +10,8 @@ import { alertInput, waitAlert, notifyError } from "../alert"
 import { decodeRisuSave, encodeRisuSaveLegacy } from "./risuSave"
 import { normalizeChat } from "./database.svelte"
 import type { PatchServerTimings } from "./saveMetrics"
-import { transferCache, type TransferCopyInput } from './transferCache'
+import { transferCache, type TransferCopyInput, type TransferVersion } from './transferCache'
+import { measureStartupPhase } from '../startup'
 import { Sha256 } from '@aws-crypto/sha256-js'
 import { gzipSync } from 'fflate'
 import { MIN_DELTA_BYTES, makeManifest, applyDelta } from '../../../server/node/readDelta.mjs'
@@ -288,6 +289,8 @@ export type AssetManifestOperation =
     | { type: 'rename'; index: number; name: string }
     | { type: 'replace'; index: number; item: AssetManifestTuple }
 
+export interface StorageReadOptions { deferCacheWrite?: boolean }
+
 export class NodeStorage{
     private static readonly BULK_WRITE_CLIENT_BATCH = 20
 
@@ -315,6 +318,20 @@ export class NodeStorage{
     private static sessionInitialized = false
     private static sessionPending: Promise<void> | null = null
     private refreshPending: Promise<string> | null = null
+    private deferredCacheCopies = new Map<string, TransferCopyInput>()
+    private cacheWrites: Promise<void> = Promise.resolve()
+
+    private persistDbCopy(copy: TransferCopyInput): Promise<void> {
+        this.cacheWrites = this.cacheWrites.then(() => measureStartupPhase('database-cache-write', () =>
+            transferCache.put(copy.key, copy.etag, copy.data, copy.revision))).catch(() => {})
+        return this.cacheWrites
+    }
+
+    flushDeferredCacheWrites(): Promise<void> {
+        const pending = [...this.deferredCacheCopies.values()]
+        this.deferredCacheCopies.clear()
+        return Promise.all(pending.map(copy => this.persistDbCopy(copy))).then(() => {})
+    }
 
     constructor(
         private readonly fetchFn: StorageFetch = defaultStorageFetch,
@@ -641,22 +658,43 @@ export class NodeStorage{
         this._lastDbWriteDiagnostics = null
         return diagnostics
     }
-    async getItem(key:string):Promise<Buffer> {
+    async getItem(key:string, options: StorageReadOptions = {}):Promise<Buffer> {
         const headers: Record<string, string> = {
             'file-path': Buffer.from(key, 'utf-8').toString('hex')
         }
         const isDatabase = key === 'database/database.bin'
+        const measured = async <T>(phase: string, operation: () => T | Promise<T>): Promise<T> =>
+            isDatabase ? measureStartupPhase(`database-${phase}`, operation) : operation()
+        const readRequest = (url: string, init: RequestInit) => measured('server-read', () => this.authFetch(url, init))
         const copyKey = isDatabase ? 'db:' + key : key.startsWith('plugin-storage/')
             ? 'plugin:' + Buffer.from(key.slice('plugin-storage/'.length).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')
             : null
-        const copy = copyKey ? await transferCache.get(copyKey) : null
+        let earlyVersion: TransferVersion | undefined
+        let earlyProbe: Promise<Response> | undefined
+        const probe = (version: TransferVersion) => measured('version-check', () => this.authFetch('/api/read', {
+            method: 'GET', cache: 'no-store', headers: {
+                ...headers, 'if-none-match': version.etag,
+                'x-read-check-only': '1', 'if-read-revision': version.revision!,
+            },
+        }))
+        const copy = copyKey ? await measured('cache-read', () => transferCache.get(copyKey, isDatabase ? version => {
+            if (!version.revision) return
+            earlyVersion = version
+            earlyProbe = probe(version)
+            // Observe failures immediately while the IDB body is still loading.
+            void earlyProbe.catch(() => {})
+        } : undefined)) : null
         if (copy) headers['if-none-match'] = copy.etag
         let da: Response
         let probed: Response | null = null
-        if (copy?.revision) {
-            probed = await this.authFetch('/api/read', { method: 'GET', cache: 'no-store', headers: {
-                ...headers, 'x-read-check-only': '1', 'if-read-revision': copy.revision,
-            } })
+        if (earlyProbe) {
+            const response = await earlyProbe
+            // Never use a 304 with a missing body or mismatched cache metadata.
+            if (copy && copy.etag === earlyVersion?.etag && copy.revision === earlyVersion?.revision) probed = response
+            else if (response.status !== 304 && (!response.ok || !response.headers.has('x-read-version-check'))) da = response
+        }
+        if (!da && copy?.revision) {
+            probed ??= await probe(copy)
             if (probed.status === 304) {
                 if (isDatabase) this._lastDbEtag = copy.etag
                 const next = probed.headers.get('x-read-revision')
@@ -667,7 +705,8 @@ export class NodeStorage{
             // Errors are handled normally, never masked by a local copy.
             if (!probed.ok || !probed.headers.has('x-read-version-check')) da = probed
         }
-        const manifest = !da && copy && copy.data.length >= MIN_DELTA_BYTES ? makeManifest(copy.data, readHash) : null
+        const manifest = !da && copy && copy.data.length >= MIN_DELTA_BYTES
+            ? await measured('delta-manifest', () => makeManifest(copy.data, readHash)) : null
         if (!da && manifest) {
             const text = JSON.stringify(manifest)
             const deltaHeaders = { ...headers, 'content-type': 'application/json' }
@@ -676,12 +715,12 @@ export class NodeStorage{
                 deltaHeaders['content-encoding'] = 'gzip'
                 body = gzipSync(new TextEncoder().encode(text)) as BodyInit
             }
-            da = await this.authFetch('/api/read-delta', { method: 'POST', headers: deltaHeaders, body, cache: 'no-store' })
+            da = await readRequest('/api/read-delta', { method: 'POST', headers: deltaHeaders, body, cache: 'no-store' })
             if (da.status === 404 || da.status === 405) {
-                da = await this.authFetch('/api/read', { method: 'GET', headers, cache: 'no-store' })
+                da = await readRequest('/api/read', { method: 'GET', headers, cache: 'no-store' })
             }
         } else if (!da) {
-            da = await this.authFetch('/api/read', { method: 'GET', headers, cache: 'no-store' })
+            da = await readRequest('/api/read', { method: 'GET', headers, cache: 'no-store' })
         }
         if (da.status === 304 && copy) {
             if (isDatabase) this._lastDbEtag = copy.etag
@@ -695,17 +734,17 @@ export class NodeStorage{
 
         let data: Buffer
         try {
-            data = Buffer.from(await da.arrayBuffer())
+            data = Buffer.from(await measured('response-body', () => da.arrayBuffer()))
             if (da.headers.get('x-read-delta') === '1') {
                 if (!copy) throw new Error('Missing read delta base')
-                data = Buffer.from(applyDelta(copy.data, data, readHash))
+                data = await measured('delta-apply', () => Buffer.from(applyDelta(copy.data, data, readHash)))
             }
         } catch (error) {
             if (da.headers.get('x-read-delta') !== '1') throw error
             // A corrupt/evicted base or an interrupted delta must never reach
             // the DB decoder. Fetch a full value once, without a validator.
             delete headers['if-none-match']
-            da = await this.authFetch('/api/read', { method: 'GET', headers, cache: 'no-store' })
+            da = await readRequest('/api/read', { method: 'GET', headers, cache: 'no-store' })
             if (!da.ok || da.headers.has('x-read-delta')) throw await this.storageRequestError('getItem', da)
             data = Buffer.from(await da.arrayBuffer())
         }
@@ -720,7 +759,14 @@ export class NodeStorage{
             return null
         }
         const copyEtag = etag ?? da.headers.get('x-storage-etag')
-        if (copyKey && copyEtag) await transferCache.put(copyKey, copyEtag, new Uint8Array(data), da.headers.get('x-read-revision') ?? undefined)
+        if (copyKey && copyEtag) {
+            const snapshot = { key: copyKey, etag: copyEtag, data: new Uint8Array(data), revision: da.headers.get('x-read-revision') ?? undefined }
+            if (isDatabase) {
+                this.deferredCacheCopies.delete(copyKey)
+                if (options.deferCacheWrite) this.deferredCacheCopies.set(copyKey, snapshot)
+                else await this.persistDbCopy(snapshot)
+            } else await transferCache.put(copyKey, copyEtag, snapshot.data, snapshot.revision)
+        }
 
         return data
     }
@@ -1132,11 +1178,17 @@ export class NodeStorage{
     // Streams every plugin-storage value (NDJSON `[key, json]` per line).
     async getPluginStorageAll(onEntry: (key: string, text: string) => void): Promise<void> {
         const prefix = 'plugin:'
-        const versions = (await transferCache.versions(prefix)).slice(0, 100_000)
+        // Current adapters enumerate both validators once in one snapshot.
+        // Legacy adapters can at least read their independent lists together.
+        const validators = transferCache.validators ? await transferCache.validators(prefix) : await Promise.all([
+            transferCache.versions(prefix), transferCache.revisions?.(prefix) ?? Promise.resolve([]),
+        ]).then(([versions, revisions]) => ({ versions, revisions }))
+        const versions = validators.versions.slice(0, 100_000)
+        const revisions = validators.revisions.slice(0, 100_000)
         let da = await this.authFetch('/api/plugin-storage/sync', {
             method: 'POST', cache: 'no-store',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ versions, readDelta: true, revisions: (await transferCache.revisions?.(prefix) ?? []).slice(0, 100_000) }),
+            body: JSON.stringify({ versions, readDelta: true, revisions }),
         })
         let delta = true
         // Old servers keep working during a rolling upgrade.

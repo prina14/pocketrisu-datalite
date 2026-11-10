@@ -17,6 +17,18 @@ export async function measureStartupPhase<T>(name: string, operation: () => T | 
     try { return await operation() } finally { finish() }
 }
 
+/** Start an optional read only after the database read/initial write has finished.
+ * The plugin index depends on server-side legacy storage migration at that boundary.
+ * loadPlugins still awaits the store's shared init promise (or retries a failure).
+ */
+export async function readDatabaseWithIndexPrefetch<T>(
+    readDatabase: () => Promise<T>, initializeIndex: () => Promise<unknown>,
+): Promise<T> {
+    const data = await readDatabase()
+    try { void initializeIndex().catch(() => {}) } catch { /* optional prefetch */ }
+    return data
+}
+
 export async function readBootBackupReminderEnabled(
     getAuth: () => Promise<string>,
     request: (input: string, init: RequestInit) => Promise<Response>,

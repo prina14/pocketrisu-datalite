@@ -85,6 +85,16 @@ describe('key encoding', () => {
 })
 
 describe('index + getItem', () => {
+    test('startup prefetch and normal initialization share one index before V2 preload', async () => {
+        seed('existing', { kept: true })
+        const early = store.init()
+        const normal = store.init()
+        expect(early).toBe(normal)
+        await Promise.all([early, normal])
+        await store.preloadAll()
+        expect(calls.filter(call => call === 'index')).toHaveLength(1)
+        expect(store.getItemSync('existing')).toEqual({ kept: true })
+    })
     test('index fetched once; key missing from index → one cheap read, null', async () => {
         seed('a', { x: 1 })
         await store.init()

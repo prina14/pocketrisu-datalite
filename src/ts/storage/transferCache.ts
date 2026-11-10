@@ -3,13 +3,16 @@
 // IP addresses, where CacheStorage/crypto.subtle may be unavailable.
 export interface TransferCopy { key: string; etag: string; data: Uint8Array; usedAt: number; revision?: string }
 export type TransferCopyInput = Omit<TransferCopy, 'usedAt'>
+export type TransferVersion = Pick<TransferCopy, 'etag' | 'revision'>
+export interface TransferValidators { versions: [string, string][]; revisions: [string, string][] }
 export interface TransferCache {
-    get(key: string): Promise<TransferCopy | null>
+    get(key: string, onVersion?: (version: TransferVersion) => void): Promise<TransferCopy | null>
     put(key: string, etag: string, data: Uint8Array, revision?: string): Promise<void>
     putBatch?(copies: TransferCopyInput[]): Promise<void>
     updateRevision(key: string, etag: string, revision: string): Promise<void>
     versions(prefix: string, revisionsOnly?: boolean): Promise<[string, string][]>
     revisions(prefix: string): Promise<[string, string][]>
+    validators?(prefix: string): Promise<TransferValidators>
 }
 
 const STORE = 'copies'
@@ -110,11 +113,41 @@ async function putCopies(copies: TransferCopyInput[]): Promise<void> {
 }
 
 export const transferCache: TransferCache = {
-    async get(key) {
+    async validators(prefix) {
+        const result: TransferValidators = { versions: [], revisions: [] }
+        try {
+            const db = await open()
+            const tx = db.transaction(META, 'readonly')
+            await new Promise<void>((resolve, reject) => {
+                const req = tx.objectStore(META).openCursor(IDBKeyRange.bound(prefix, prefix + '\uffff'))
+                req.onsuccess = () => {
+                    const cursor = req.result
+                    if (!cursor) { resolve(); return }
+                    const row = cursor.value
+                    const key = row.key.slice(prefix.length)
+                    if (typeof row.etag === 'string' && result.versions.length < 100_000) result.versions.push([key, row.etag])
+                    if (typeof row.revision === 'string' && result.revisions.length < 100_000) result.revisions.push([key, row.revision])
+                    if (result.versions.length >= 100_000 && result.revisions.length >= 100_000) resolve()
+                    else cursor.continue()
+                }
+                req.onerror = () => reject(req.error)
+            })
+            return result
+        } catch { return { versions: [], revisions: [] } }
+    },
+    async get(key, onVersion) {
         try {
             const db = await open()
             const tx = db.transaction([STORE, META], 'readonly')
             const meta = tx.objectStore(META).get(key)
+            meta.onsuccess = () => {
+                const row = meta.result
+                if (typeof row?.etag === 'string' && typeof row?.revision === 'string') {
+                    // This callback precedes the large body result in the same
+                    // readonly transaction; network validation can overlap it.
+                    try { onVersion?.({ etag: row.etag, revision: row.revision }) } catch { /* optional observer */ }
+                }
+            }
             return await new Promise<TransferCopy | null>((resolve, reject) => {
                 const req = tx.objectStore(STORE).get(key)
                 req.onsuccess = () => {

@@ -22,6 +22,7 @@ function storage(fetcher: any) {
 beforeEach(() => {
     vi.clearAllMocks()
     delete transferCache.putBatch // Older adapters/mocks keep their per-key API.
+    delete transferCache.validators
     copies.clear()
     vi.mocked(transferCache.get).mockImplementation(async k => copies.get(k) ?? null)
     vi.mocked(transferCache.put).mockImplementation(async (key, etag, data, revision) => { copies.set(key, { key, etag, data, revision }) })
@@ -31,6 +32,183 @@ beforeEach(() => {
 })
 
 describe('validated boot copies', () => {
+    test('an in-flight deferred copy cannot finish after and overwrite a newer immediate DB copy', async () => {
+        const normalPut = vi.mocked(transferCache.put).getMockImplementation()!
+        let release!: () => void
+        const gate = new Promise<void>(resolve => { release = resolve })
+        vi.mocked(transferCache.put).mockImplementationOnce(async (...args) => {
+            await gate
+            return normalPut(...args)
+        })
+        const fetcher = vi.fn().mockImplementation(async () => new Response('old', { headers: { 'x-db-etag': 'old' } }))
+        const s = storage(fetcher)
+        await s.getItem('database/database.bin', { deferCacheWrite: true })
+        const first = s.flushDeferredCacheWrites()
+        await vi.waitFor(() => expect(transferCache.put).toHaveBeenCalledOnce())
+        fetcher.mockImplementation(async () => new Response('new', { headers: { 'x-db-etag': 'new' } }))
+        const newer = s.getItem('database/database.bin')
+        await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2))
+        expect(transferCache.put).toHaveBeenCalledOnce()
+        release()
+        await Promise.all([first, newer])
+        expect(vi.mocked(transferCache.put).mock.calls.map(args => args[1])).toEqual(['old', 'new'])
+        expect(copies.get('db:database/database.bin').etag).toBe('new')
+    })
+
+    test('controlled 300ms download and 800ms persistence return boot data at 300ms instead of 1100ms', async () => {
+        vi.useFakeTimers()
+        try {
+            const elapsed: number[] = []
+            vi.mocked(transferCache.put).mockImplementation(async () => {
+                await new Promise(resolve => setTimeout(resolve, 800))
+            })
+            for (const deferCacheWrite of [false, true]) {
+                const fetcher = vi.fn(async () => {
+                    await new Promise(resolve => setTimeout(resolve, 300))
+                    return new Response('current', { headers: { 'x-db-etag': 'new' } })
+                })
+                const s = storage(fetcher)
+                const start = Date.now()
+                let readyAt = -1
+                const result = s.getItem('database/database.bin', { deferCacheWrite }).then(data => {
+                    readyAt = Date.now() - start
+                    return data
+                })
+                await vi.runAllTimersAsync()
+                expect((await result).toString()).toBe('current')
+                elapsed.push(readyAt)
+                const flush = s.flushDeferredCacheWrites()
+                await vi.runAllTimersAsync()
+                await flush
+            }
+            expect(elapsed).toEqual([1100, 300])
+        } finally { vi.useRealTimers() }
+    })
+
+    test('controlled 300ms cache and 600ms validation complete in 600ms instead of 900ms', async () => {
+        vi.useFakeTimers()
+        try {
+            const copy = { etag: 'hash', revision: 'r1', data: bytes('cached') }
+            const elapsed: number[] = []
+            for (const overlap of [false, true]) {
+                vi.mocked(transferCache.get).mockImplementation(async (_key, onVersion) => {
+                    if (overlap) onVersion?.(copy)
+                    await new Promise(resolve => setTimeout(resolve, 300))
+                    return copy as any
+                })
+                const fetcher = vi.fn(async () => {
+                    await new Promise(resolve => setTimeout(resolve, 600))
+                    return new Response(null, { status: 304 })
+                })
+                const start = Date.now()
+                const result = storage(fetcher).getItem('database/database.bin')
+                await vi.runAllTimersAsync()
+                expect((await result).toString()).toBe('cached')
+                elapsed.push(Date.now() - start)
+            }
+            expect(elapsed).toEqual([900, 600])
+        } finally { vi.useRealTimers() }
+    })
+
+    test('a legacy server body returned to the early probe is consumed without downloading twice', async () => {
+        const copy = { etag: 'hash', revision: 'r1', data: bytes('old') }
+        vi.mocked(transferCache.get).mockImplementation(async (_key, onVersion) => {
+            onVersion?.(copy)
+            return copy as any
+        })
+        const fetcher = vi.fn().mockResolvedValue(new Response('current', { headers: { 'x-db-etag': 'new' } }))
+        expect((await storage(fetcher).getItem('database/database.bin')).toString()).toBe('current')
+        expect(fetcher).toHaveBeenCalledOnce()
+    })
+
+    test('starts revision validation before a delayed cache body is available', async () => {
+        let release!: () => void
+        const gate = new Promise<void>(resolve => { release = resolve })
+        const copy = { etag: 'hash', revision: 'r1', data: bytes('cached') }
+        vi.mocked(transferCache.get).mockImplementation(async (_key, onVersion) => {
+            onVersion?.({ etag: copy.etag, revision: copy.revision })
+            await gate
+            return copy as any
+        })
+        const fetcher = vi.fn().mockResolvedValue(new Response(null, { status: 304 }))
+        const reading = storage(fetcher).getItem('database/database.bin')
+        await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce())
+        let finished = false
+        void reading.then(() => { finished = true })
+        await Promise.resolve()
+        expect(finished).toBe(false)
+        release()
+        expect((await reading).toString()).toBe('cached')
+        expect(fetcher).toHaveBeenCalledOnce()
+    })
+
+    test.each([false, true])('an early 304 never serves a missing or mismatched copy (missing=%s)', async missing => {
+        vi.mocked(transferCache.get).mockImplementation(async (_key, onVersion) => {
+            onVersion?.({ etag: 'meta-hash', revision: 'meta-r' })
+            return missing ? null : { etag: 'other-hash', data: bytes('other') } as any
+        })
+        const fetcher = vi.fn().mockResolvedValueOnce(new Response(null, { status: 304 }))
+            .mockResolvedValueOnce(new Response('server-current', { headers: { 'x-db-etag': 'current' } }))
+        expect((await storage(fetcher).getItem('database/database.bin')).toString()).toBe('server-current')
+        expect(fetcher).toHaveBeenCalledTimes(2)
+    })
+
+    test('failed early authentication is not masked by a cached body', async () => {
+        vi.mocked(transferCache.get).mockImplementation(async (_key, onVersion) => {
+            onVersion?.({ etag: 'hash', revision: 'r1' })
+            return { etag: 'hash', revision: 'r1', data: bytes('private') } as any
+        })
+        const fetcher = vi.fn().mockResolvedValue(new Response('{"error":"Denied"}', { status: 403 }))
+        await expect(storage(fetcher).getItem('database/database.bin')).rejects.toMatchObject({ status: 403 })
+    })
+
+    test('boot reads return before optional cache persistence and flush a defensive snapshot later', async () => {
+        const fetcher = vi.fn().mockResolvedValue(new Response('server-data', { headers: { 'x-db-etag': 'new', 'x-read-revision': 'r1' } }))
+        const s = storage(fetcher)
+        const data = await s.getItem('database/database.bin', { deferCacheWrite: true })
+        expect(data.toString()).toBe('server-data')
+        expect(transferCache.put).not.toHaveBeenCalled()
+        data[0] = 0
+        await s.flushDeferredCacheWrites()
+        expect(transferCache.put).toHaveBeenCalledOnce()
+        expect(new TextDecoder().decode(copies.get('db:database/database.bin').data)).toBe('server-data')
+        await s.flushDeferredCacheWrites()
+        expect(transferCache.put).toHaveBeenCalledOnce()
+    })
+
+    test('only the newest deferred DB copy is flushed; a newer immediate read cancels an older pending copy', async () => {
+        const fetcher = vi.fn().mockImplementation(async () => new Response('new', { headers: { 'x-db-etag': 'new' } }))
+        const s = storage(fetcher)
+        await s.getItem('database/database.bin', { deferCacheWrite: true })
+        fetcher.mockImplementation(async () => new Response('latest', { headers: { 'x-db-etag': 'latest' } }))
+        await s.getItem('database/database.bin', { deferCacheWrite: true })
+        await s.flushDeferredCacheWrites()
+        expect(transferCache.put).toHaveBeenCalledOnce()
+        expect(copies.get('db:database/database.bin').etag).toBe('latest')
+        copies.clear()
+        await s.getItem('database/database.bin', { deferCacheWrite: true })
+        fetcher.mockImplementation(async () => new Response('immediate', { headers: { 'x-db-etag': 'immediate' } }))
+        await s.getItem('database/database.bin')
+        await s.flushDeferredCacheWrites()
+        expect(transferCache.put).toHaveBeenCalledTimes(2)
+        expect(copies.get('db:database/database.bin').etag).toBe('immediate')
+    })
+
+    test('slow or failed optional persistence does not hold a boot read or poison subsequent writes', async () => {
+        let reject!: (error: Error) => void
+        vi.mocked(transferCache.put).mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail }))
+        const fetcher = vi.fn().mockImplementation(async () => new Response('new', { headers: { 'x-db-etag': 'new' } }))
+        const s = storage(fetcher)
+        expect((await s.getItem('database/database.bin', { deferCacheWrite: true })).toString()).toBe('new')
+        const flushing = s.flushDeferredCacheWrites()
+        await vi.waitFor(() => expect(transferCache.put).toHaveBeenCalledOnce())
+        reject(new Error('quota'))
+        await flushing
+        await s.getItem('database/database.bin', { deferCacheWrite: true })
+        await s.flushDeferredCacheWrites()
+        expect(transferCache.put).toHaveBeenCalledTimes(2)
+    })
+
     test('a known revision validates a large copy without uploading chunk hashes', async () => {
         const data = randomBytes(1024 * 1024)
         copies.set('db:database/database.bin', { etag: 'hash', revision: 'r1', data })
@@ -94,6 +272,37 @@ describe('validated boot copies', () => {
 })
 
 describe('plugin delta preload', () => {
+    test('uses a single combined validator snapshot when the cache supports it', async () => {
+        transferCache.validators = vi.fn().mockResolvedValue({
+            versions: [['a', 'h1']], revisions: [['a', 'r1']],
+        })
+        const fetcher = vi.fn().mockResolvedValue(ndjson([{ done: true }]))
+        await storage(fetcher).getPluginStorageAll(() => {})
+        expect(transferCache.validators).toHaveBeenCalledExactlyOnceWith('plugin:')
+        expect(transferCache.versions).not.toHaveBeenCalled()
+        expect(transferCache.revisions).not.toHaveBeenCalled()
+        expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({
+            versions: [['a', 'h1']], revisions: [['a', 'r1']], readDelta: true,
+        })
+    })
+    test('starts both legacy validator reads before waiting for either result', async () => {
+        let releaseVersions!: (value: [string, string][]) => void
+        let releaseRevisions!: (value: [string, string][]) => void
+        vi.mocked(transferCache.versions).mockImplementation(() => new Promise(resolve => { releaseVersions = resolve }))
+        vi.mocked(transferCache.revisions).mockImplementation(() => new Promise(resolve => { releaseRevisions = resolve }))
+        const fetcher = vi.fn().mockResolvedValue(ndjson([{ done: true }]))
+        const preload = storage(fetcher).getPluginStorageAll(() => {})
+        expect(transferCache.versions).toHaveBeenCalledWith('plugin:')
+        expect(transferCache.revisions).toHaveBeenCalledWith('plugin:')
+        releaseRevisions([['a', 'r1']])
+        await Promise.resolve()
+        expect(fetcher).not.toHaveBeenCalled()
+        releaseVersions([['a', 'h1']])
+        await preload
+        expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({
+            versions: [['a', 'h1']], revisions: [['a', 'r1']], readDelta: true,
+        })
+    })
     function batchWriter() {
         const write = vi.fn(async (rows: any[]) => {
             for (const row of rows) copies.set(row.key, { ...row })

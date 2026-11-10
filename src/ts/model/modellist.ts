@@ -580,14 +580,29 @@ export async function registerModelDynamic(){
     if(!DBState.db.dynamicModelRegistry){
         return
     }
+    // Start independent requests together, but apply Google then Anthropic as
+    // before so model-id collisions retain their existing precedence.
+    const start = async (read: () => Promise<Response>) => {
+        try { return { ok: true as const, response: await read() } }
+        catch (error) { return { ok: false as const, error } }
+    }
+    const googleToken = DBState.db.google?.accessToken
+    const anthropicKey = DBState.db.claudeAPIKey
+    const googleRead = googleToken ? start(() =>
+        fetchNative(`https://generativelanguage.googleapis.com/v1beta/models?key=${googleToken}`, {
+            logCategory: 'other', logSource: 'other', method: 'GET',
+        })) : null
+    const anthropicRead = anthropicKey ? start(() =>
+        fetchNative('https://api.anthropic.com/v1/models', {
+            logCategory: 'other', logSource: 'other', method: 'GET',
+            headers: { 'anthropic-version': '2023-06-01', 'x-api-key': anthropicKey },
+        })) : null
     //google
     try {
-        if(DBState.db.google.accessToken){
-            const res = await fetchNative(`https://generativelanguage.googleapis.com/v1beta/models?key=${DBState.db.google.accessToken}`, {
-                logCategory: 'other',
-                logSource: 'other',
-                method: 'GET',
-            })
+        if(googleRead){
+            const result = await googleRead
+            if (!result.ok) throw result.error
+            const res = result.response
             const json = await res.json()
             console.log('Google models response', json)
             const models = json?.models || []
@@ -625,16 +640,10 @@ export async function registerModelDynamic(){
 
     //Anthropic
     try {
-        if(DBState.db.claudeAPIKey){
-            const res = await fetchNative('https://api.anthropic.com/v1/models', {
-                logCategory: 'other',
-                logSource: 'other',
-                method: 'GET',
-                headers: {
-                    'anthropic-version': '2023-06-01',
-                    "x-api-key": DBState.db.claudeAPIKey,
-                }
-            })
+        if(anthropicRead){
+            const result = await anthropicRead
+            if (!result.ok) throw result.error
+            const res = result.response
 
             const json = await res.json()
             console.log('Anthropic models response', json)
