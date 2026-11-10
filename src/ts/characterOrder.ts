@@ -22,6 +22,18 @@ export type OrderLayoutItem =
     | { type: 'char'; id: string }
     | { type: 'folder'; id: string; data: string[] }
 
+/** Collapsed folders have no mounted rows; their stored membership is authoritative. */
+export function restoreCollapsedFolderLayout(
+    previous: OrderEntry[], layout: OrderLayoutItem[], collapsed: ReadonlySet<string>,
+): OrderLayoutItem[] {
+    const folders = new Map(previous.filter(isFolderEntry).map(entry => [entry.id, entry]))
+    return layout.map(item => {
+        if (item.type !== 'folder' || !collapsed.has(item.id)) return item
+        const folder = folders.get(item.id)
+        return folder ? { ...item, data: [...folder.data] } : item
+    })
+}
+
 export function isFolderEntry(entry: OrderEntry | null | undefined): entry is folder {
     return !!entry && typeof entry !== 'string'
 }

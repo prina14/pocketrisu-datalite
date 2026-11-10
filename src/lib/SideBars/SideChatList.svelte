@@ -26,6 +26,7 @@
     import ModelBind from "./ModelBind.svelte";
     import { changeChatTo, createChatCopyName, requestImmediateSave } from "src/ts/globalApi.svelte";
     import { reissueMessageIds } from "src/ts/chatClone";
+    import { indexChatsByFolder } from "src/ts/chatFolderIndex";
     import MemoryBind from "./MemoryBind.svelte";
 
     interface Props {
@@ -34,6 +35,7 @@
 
     let { chara = $bindable() }: Props = $props();
     let editMode = $state(false)
+    const chatsByFolder = $derived(indexChatsByFolder(chara.chats))
 
     // Safety net: chats whose folderId references a deleted folder would
     // otherwise be invisible (excluded from both the no-folder section and
@@ -174,6 +176,7 @@
         <div class="flex flex-col" bind:this={folderEles}>
             <!-- chat folder -->
             {#each chara.chatFolders as folder, i}
+            {@const folderChats = chatsByFolder.get(String(folder.id)) ?? []}
             <div data-risu-chat-folder-idx={i}
                 class="flex flex-col mb-2 border-solid border-1 border-darkborderc cursor-pointer rounded-md">
                 <!-- folder header -->
@@ -250,12 +253,13 @@
                 </button>
                 <!-- chats in folder -->
                 <div class="risu-chat flex flex-col w-full text-textcolor border-solid border-0 border-darkborderc p-2 cursor-pointer rounded-md {folder.folded ? 'hidden' : ''}">
-                    {#if chara.chats.filter(chat => chat.folderId == chara.chatFolders[i].id).length == 0}
+                    {#if folderChats.length == 0}
                     <span class="no-sort flex justify-center text-textcolor2">Empty</span>
                     <div></div>
                     {:else}
-                    {#each chara.chats.filter(chat => chat.folderId == chara.chatFolders[i].id) as chat}
-                    {@const chatIdx = chara.chats.indexOf(chat)}
+                    {#each folderChats as entry}
+                    {@const chat = entry.chat}
+                    {@const chatIdx = entry.index}
                     <button data-risu-chat-idx={chatIdx} onclick={() => {
                         if(!editMode){
                             changeChatTo(chatIdx)

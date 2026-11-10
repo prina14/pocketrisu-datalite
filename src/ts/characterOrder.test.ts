@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
     rebuildOrder,
+    restoreCollapsedFolderLayout,
     moveCharacterToFolder,
     moveTopLevelEntry,
     moveCharacterInFolder,
@@ -13,6 +14,27 @@ import {
     pruneHiddenCharacterIds,
     type OrderEntry,
 } from './characterOrder'
+
+it('reorders collapsed folders without detaching their 10,000 unmounted characters', () => {
+    const first = { id: 'one', name: 'One', data: Array.from({ length: 5000 }, (_, i) => `a-${i}`) }
+    const second = { id: 'two', name: 'Two', data: Array.from({ length: 5000 }, (_, i) => `b-${i}`) }
+    const previous = [first, 'loose', second] as OrderEntry[]
+    const layout = restoreCollapsedFolderLayout(previous, [
+        { type: 'folder', id: 'two', data: [] }, { type: 'char', id: 'loose' }, { type: 'folder', id: 'one', data: [] },
+    ], new Set(['one', 'two']))
+    const next = rebuildOrder(previous, layout)
+    expect(next).toEqual([second, 'loose', first])
+    expect((layout[0] as { data: string[] }).data).not.toBe(second.data)
+})
+
+it('keeps actual dragged membership for expanded folders and ignores unknown collapsed ids', () => {
+    const previous = [{ id: 'one', data: ['a', 'b'] }] as OrderEntry[]
+    expect(restoreCollapsedFolderLayout(previous, [
+        { type: 'folder', id: 'one', data: ['b'] }, { type: 'char', id: 'a' }, { type: 'folder', id: 'gone', data: [] },
+    ], new Set(['gone']))).toEqual([
+        { type: 'folder', id: 'one', data: ['b'] }, { type: 'char', id: 'a' }, { type: 'folder', id: 'gone', data: [] },
+    ])
+})
 
 function sample(): OrderEntry[] {
     return [

@@ -1,4 +1,7 @@
 @import "tailwindcss";
+/* Keep formula styling and fonts on the same server as the app. An external
+   blocking stylesheet would delay module execution and the first paint. */
+@import "katex/dist/katex.min.css";
 
 @plugin '@tailwindcss/typography';
 

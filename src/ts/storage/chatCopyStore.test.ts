@@ -18,7 +18,7 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 function connect(): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
-        const request = indexedDB.open(name, 1)
+        const request = indexedDB.open(name)
         request.onupgradeneeded = () => request.result.createObjectStore('chats', { keyPath: 'key' }).createIndex('usedAt', 'usedAt')
         request.onsuccess = () => resolve(request.result)
         request.onerror = () => reject(request.error)
@@ -48,6 +48,58 @@ test('reads records written by the existing version-1 schema', async () => {
     expect(await copies.get('legacy')).toEqual(chat(2, 'old copy'))
 })
 
+test('reading a 20,000-message chat writes only small recency metadata, even when that write fails', async () => {
+    const { indexedDbChatCopies: copies } = await import('./chatCopyStore')
+    const large = chat(20_000)
+    for (const message of large.message) message.data = 'x'.repeat(250)
+    await copies.put('large', large)
+    const db = await connect()
+    const proto = Object.getPrototypeOf(db.transaction('chats').objectStore('chats'))
+    const original = proto.put
+    let bodyWrites = 0, metadataWrites = 0
+    const spy = vi.spyOn(proto, 'put').mockImplementation(function(this: IDBObjectStore, value: any, ...args: any[]) {
+        if (this.name === 'chats') bodyWrites++
+        else { metadataWrites++; expect(value.chat).toBeUndefined() }
+        return original.apply(this, [value, ...args])
+    })
+    expect(await copies.get('large')).toEqual(large)
+    expect(bodyWrites).toBe(0)
+    expect(metadataWrites).toBe(1)
+    spy.mockImplementation(function(this: IDBObjectStore) {
+        if (this.name === 'chats') throw new Error('must not rewrite the body')
+        throw new DOMException('metadata quota', 'QuotaExceededError')
+    })
+    expect(await copies.get('large')).toEqual(large)
+    spy.mockRestore()
+    db.close()
+})
+
+test('an aborted recency write at commit still returns the valid cached body', async () => {
+    const { indexedDbChatCopies: copies } = await import('./chatCopyStore')
+    await copies.put('keep', chat(2))
+    const db = await connect()
+    const raw = (db.transaction('recency').objectStore('recency') as any)._rawObjectStore
+    vi.spyOn(raw, 'storeRecord').mockImplementationOnce(() => { throw new DOMException('quota', 'QuotaExceededError') })
+    expect(await copies.get('keep')).toEqual(chat(2))
+    db.close()
+})
+
+test('body and recency update roll back together if metadata cannot be stored', async () => {
+    const { indexedDbChatCopies: copies } = await import('./chatCopyStore')
+    await copies.put('keep', chat(2, 'previous'))
+    const db = await connect()
+    const proto = Object.getPrototypeOf(db.transaction('chats').objectStore('chats'))
+    const original = proto.put
+    const spy = vi.spyOn(proto, 'put').mockImplementation(function(this: IDBObjectStore, value: any, ...args: any[]) {
+        if (this.name === 'recency') throw new DOMException('quota', 'QuotaExceededError')
+        return original.apply(this, [value, ...args])
+    })
+    await expect(copies.put('keep', chat(3, 'new'))).rejects.toMatchObject({ name: 'QuotaExceededError' })
+    spy.mockRestore()
+    expect(await copies.get('keep')).toEqual(chat(2, 'previous'))
+    db.close()
+})
+
 test('quota retries evict least-recently-used keys in batches, preserve the updated key, and avoid reading chat bodies', async () => {
     const { indexedDbChatCopies: copies } = await import('./chatCopyStore')
     for (let i = 0; i < 26; i++) await copies.put(`old-${String(i).padStart(2, '0')}`, chat())
@@ -64,7 +116,7 @@ test('quota retries evict least-recently-used keys in batches, preserve the upda
         return originalPut.apply(this, [value, ...args])
     })
     vi.spyOn(proto, 'delete').mockImplementation(function (key: IDBValidKey) {
-        deleted.push(key)
+        if (this.name === "chats") deleted.push(key)
         return originalDelete.call(this, key)
     })
     const cursor = vi.spyOn(indexProto, 'openKeyCursor')

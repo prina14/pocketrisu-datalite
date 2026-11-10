@@ -36,6 +36,46 @@ function memoryCopies(): ChatCopyStore & { map: Map<string, any> } {
 const settle = () => new Promise((r) => setTimeout(r, 0))
 
 describe('chat delta sync — loading', () => {
+    test('an unchanged 20,000-message reopening reuses the validated body without another snapshot or cache write', async () => {
+        const server = fakeServer(chatOf(20_000))
+        const copies = memoryCopies()
+        await createChatDeltaSync(server.transport, copies).fetchChat('char', 0, 'chat')
+        await settle()
+        const write = vi.spyOn(copies, 'put')
+        const originalClone = structuredClone
+        let fullClones = 0
+        const clone = vi.spyOn(globalThis, 'structuredClone').mockImplementation((value, options) => {
+            if ((value as any)?.message?.length === 20_000) fullClones++
+            return originalClone(value, options)
+        })
+        try {
+            const full = await createChatDeltaSync(server.transport, copies).fetchChat('char', 0, 'chat')
+            await settle()
+            expect(full).toEqual(server.stored)
+            expect(fullClones).toBe(1) // store.get owns one defensive copy
+            expect(write).not.toHaveBeenCalled()
+            full!.message[0].data = 'local unsaved edit'
+            expect(copies.map.get('char|chat').message[0].data).not.toBe('local unsaved edit')
+        } finally { clone.mockRestore(); write.mockRestore() }
+    })
+
+    test.each(['note', 'localLore', 'clearedField'])('metadata-only changes still update the cached body (%s)', async field => {
+        const server = fakeServer(chatOf(50, { clearedField: 'old' }))
+        const copies = memoryCopies()
+        await createChatDeltaSync(server.transport, copies).fetchChat('char', 0, 'chat')
+        await settle()
+        if (field === 'note') server.stored.note = 'new note'
+        if (field === 'localLore') server.stored.localLore = [{ key: 'changed', content: 'new' }]
+        if (field === 'clearedField') server.stored.clearedField = null
+        const write = vi.spyOn(copies, 'put')
+        try {
+            const full = await createChatDeltaSync(server.transport, copies).fetchChat('char', 0, 'chat')
+            await settle()
+            expect(full).toEqual(server.stored)
+            expect(write).toHaveBeenCalledOnce()
+            expect(copies.map.get('char|chat')).toEqual(server.stored)
+        } finally { write.mockRestore() }
+    })
     test.each([0, 1, 12, 39, 40])('keeps a full copy with %i messages, including metadata', async n => {
         const server = fakeServer(chatOf(n, { note: 'keep metadata even when empty' }))
         const copies = memoryCopies()

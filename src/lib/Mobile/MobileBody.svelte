@@ -2,11 +2,9 @@
     import { MobileGUIStack, MobileSearch, MobileSideBar, selectedCharID } from "src/ts/stores.svelte";
     import CharacterManager from "../CharacterManager/CharacterManager.svelte";
     import ChatScreen from "../ChatScreens/ChatScreen.svelte";
-    import CharConfig from "../SideBars/CharConfig.svelte";
     import { WrenchIcon } from "@lucide/svelte";
     import { language } from "src/lang";
     import SideChatList from "../SideBars/SideChatList.svelte";
-    import DevTool from "../SideBars/DevTool.svelte";
     import { isLite } from "src/ts/lite";
     
     import { DBState } from 'src/ts/stores.svelte';
@@ -14,6 +12,8 @@
 
     const loadSettings = () => import('../Setting/Settings.svelte');
     const loadRealmBrowser = () => import('../UI/Realm/RealmBrowser.svelte');
+    const loadCharConfig = () => import('../SideBars/CharConfig.svelte');
+    const loadDevTool = () => import('../SideBars/DevTool.svelte');
 </script>
 
 {#if $MobileSideBar > 0 && $selectedCharID !== -1 && !$isLite}
@@ -44,9 +44,13 @@
             {#if $MobileSideBar === 1}
                 <SideChatList bind:chara={DBState.db.characters[$selectedCharID]} />
             {:else if $MobileSideBar === 2}
-                <CharConfig />
+                <LazyBoundary load={loadCharConfig} close={() => { $MobileSideBar = 1; }}>
+                    {#snippet children(CharConfig)}<CharConfig />{/snippet}
+                </LazyBoundary>
             {:else if $MobileSideBar === 3}
-                <DevTool />
+                <LazyBoundary load={loadDevTool} close={() => { $MobileSideBar = 1; }}>
+                    {#snippet children(DevTool)}<DevTool />{/snippet}
+                </LazyBoundary>
             {/if}
         </div>
     {:else if $selectedCharID !== -1}

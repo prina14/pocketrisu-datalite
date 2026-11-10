@@ -46,7 +46,6 @@
     deselectCharacter,
     getCharImage,
   } from "../../ts/characters";
-    import CharConfig from "./CharConfig.svelte";
     import { language } from "../../lang";
     import isEqual from "lodash/isEqual";
     import SidebarAvatar from "./SidebarAvatar.svelte";
@@ -58,7 +57,6 @@
   import { supportDialogOpen, supportEnabled, initSupport } from "src/ts/support";
 
   import { sideBarSize } from "src/ts/gui/guisize";
-  import DevTool from "./DevTool.svelte";
     import LazyBoundary from "../UI/LazyBoundary.svelte";
     import PluginDefinedIcon from "../Others/PluginDefinedIcon.svelte";
   const isTouchDevice = typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches;
@@ -71,6 +69,8 @@
   let menuMode = $state(0);
   let devTool = $state(false)
   const loadQuickSettings = () => import('../Others/QuickSettingsGUI.svelte');
+  const loadCharConfig = () => import('./CharConfig.svelte');
+  const loadDevTool = () => import('./DevTool.svelte');
 
   function reseter() {
     menuMode = 0;
@@ -1261,9 +1261,13 @@
           {/snippet}
         </LazyBoundary>
       {:else if devTool}
-        <DevTool />
+        <LazyBoundary load={loadDevTool} close={() => { devTool = false; }}>
+          {#snippet children(DevTool)}<DevTool />{/snippet}
+        </LazyBoundary>
       {:else if $botMakerMode}
-        <CharConfig />
+        <LazyBoundary load={loadCharConfig} close={() => { botMakerMode.set(false); }}>
+          {#snippet children(CharConfig)}<CharConfig />{/snippet}
+        </LazyBoundary>
       {:else}
         <SideChatList bind:chara={ DBState.db.characters[$selectedCharID]} />
       {/if}

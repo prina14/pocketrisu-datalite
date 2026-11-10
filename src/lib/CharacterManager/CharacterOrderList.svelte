@@ -12,7 +12,7 @@
     import ShDropdownMenuTrigger from "src/lib/UI/GUI/ShDropdownMenuTrigger.svelte";
     import ShDropdownMenuContent from "src/lib/UI/GUI/ShDropdownMenuContent.svelte";
     import CharacterRow from "./CharacterRow.svelte";
-    import { isFolderEntry, type OrderEntry, type OrderLayoutItem } from "src/ts/characterOrder";
+    import { isFolderEntry, restoreCollapsedFolderLayout, type OrderEntry, type OrderLayoutItem } from "src/ts/characterOrder";
     import type { ManagerEntry } from "src/ts/characterManager";
     import { folderDisplayMode, type folder } from "src/ts/storage/database.svelte";
     import { language } from "src/lang";
@@ -104,7 +104,7 @@
                 if (id) out.push({ type: 'char', id });
             }
         }
-        return out;
+        return restoreCollapsedFolderLayout(order, out, collapsed);
     }
 
     function onDrop() {
@@ -154,6 +154,7 @@
                     {/if}
                 </div>
                 <div data-folder-container={entry.id} class:hidden={isCollapsed}>
+                    {#if !isCollapsed}
                     <ShSortableList
                         className="flex flex-col px-2 pb-2 gap-0.5 min-h-8"
                         disabled={dragDisabled}
@@ -166,6 +167,7 @@
                             <div class="no-sort text-xs text-textcolor2 text-center py-1">{language.none}</div>
                         {/each}
                     </ShSortableList>
+                    {/if}
                 </div>
             </div>
         {:else}

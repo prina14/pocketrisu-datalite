@@ -1,6 +1,7 @@
 import type { Chat } from './database.svelte'
 import { messageFingerprints, prefixFingerprint } from './chatFingerprint'
 import rfdc from 'rfdc'
+import isEqual from 'lodash/isEqual'
 import type { ChatCopyStore } from './chatCopyStore'
 export type { ChatCopyStore } from './chatCopyStore'
 export { indexedDbChatCopies } from './chatCopyStore'
@@ -78,14 +79,20 @@ export function createChatDeltaSync(transport: ChatDeltaTransport, copies: ChatC
         let full: Chat = result.chat
         let fingerprints: string[]
         if (result.deltaBase !== null && copy && copyFingerprints && result.deltaBase === copy.message.length) {
-            full = { ...result.chat, message: copy.message.concat(result.chat.message) }
-            fingerprints = copyFingerprints.concat(messageFingerprints(result.chat.message))
+            const hasNewMessages = result.chat.message.length > 0
+            full = { ...result.chat, message: hasNewMessages ? copy.message.concat(result.chat.message) : copy.message }
+            fingerprints = hasNewMessages ? copyFingerprints.concat(messageFingerprints(result.chat.message)) : copyFingerprints
         } else {
             fingerprints = messageFingerprints(full.message ?? [])
         }
         serverFingerprints.set(key, fingerprints)
 
-        if (isUsableCopy(full)) {
+        // The server verified the prefix. Compare metadata only: a warm open
+        // must not clone/rewrite the entire unchanged transcript to cache it.
+        const unchanged = result.deltaBase !== null && copy &&
+            result.deltaBase === copy.message.length && result.chat.message.length === 0 &&
+            isEqual({ ...copy, message: undefined }, { ...full, message: undefined })
+        if (!unchanged && isUsableCopy(full)) {
             const snapshot = snapshotChat(full)
             if (snapshot) void persistCopy(key, snapshot)
         }

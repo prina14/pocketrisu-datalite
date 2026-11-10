@@ -2,6 +2,9 @@
 
 `v1.17.0-datalite.7`에 포함하는 소스 변경 사항입니다. 로컬 프로덕션 빌드를 완료했으며, GitHub Release 워크플로가 검증 후 Linux x64 포터블을 빌드·게시합니다.
 
+v8의 추가 변경과 외부 CSS 지연 재현 결과는 [첫 화면의 외부 CSS 대기 제거](first-paint-blockers.md)에 기록했습니다.
+대량 데이터의 캐시·폴더 목록 변경은 [대량 캐릭터·대화 최적화](large-history-performance.md)에 기록했습니다.
+
 ## 로딩 경로
 
 첫 화면까지는 앱 JavaScript 다운로드·실행, 가져오기 상태 확인, 저장소 초기화,
