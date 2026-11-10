@@ -1,7 +1,7 @@
 import { asBuffer } from 'src/ts/util';
 import { getChatVar, getChatVarOf, getGlobalChatVar, setChatVar, setChatVarOf } from "../parser/chatVar.svelte";
 import { hasher, type simpleCharacterArgument, risuChatParser } from "../parser/parser.svelte";
-import { LuaEngine, LuaFactory } from "wasmoon";
+import type { LuaEngine, LuaFactory } from "wasmoon";
 import { getCurrentCharacter, getCurrentChat, getDatabase, setDatabase, type Chat, type character, type triggerscript } from "../storage/database.svelte";
 import { get } from "svelte/store";
 import { ReloadChatPointer, ReloadGUIPointer, selectedCharID } from "../stores.svelte";
@@ -1218,6 +1218,7 @@ export async function runScripted(code:string, arg:{
 }
 
 async function makeLuaFactory(){
+    const { LuaFactory } = await import('wasmoon')
     const _luaFactory = new LuaFactory()
     async function mountFile(name:string){
         let code = ''

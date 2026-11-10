@@ -375,6 +375,20 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout release notes
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: docs/releases
+
+      - name: Select versioned release notes
+        id: notes
+        shell: bash
+        run: |
+          NOTES_FILE="docs/releases/${GITHUB_REF_NAME}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            printf 'path=%s\n' "$NOTES_FILE" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Download all portable artifacts
         uses: actions/download-artifact@v8
         with:
@@ -387,6 +401,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: PocketRisu DataLite ${{ github.ref_name }}
+          body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: true
           draft: true
           prerelease: false

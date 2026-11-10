@@ -88,6 +88,13 @@ function createChunkStore(db, opts = {}) {
     );
     const kvSet = db.prepare('INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?, ?, ?)');
     const kvGet = db.prepare('SELECT value FROM kv WHERE key = ?');
+    // Size-only callers must not copy raw BLOBs into Node. SQLite can read
+    // LENGTH(BLOB) from its metadata; only marker-sized values need comparing.
+    const kvInfo = db.prepare(
+        `SELECT LENGTH(value) AS size,
+                CASE WHEN LENGTH(value) = ? THEN value = ? ELSE 0 END AS chunked
+         FROM kv WHERE key = ?`,
+    );
     const kvDel = db.prepare('DELETE FROM kv WHERE key = ?');
     // Defensive self-heal: drop any manifest that is not backed by a live chunked
     // kv row — i.e. the key is gone OR its value is no longer the marker (some
@@ -145,19 +152,19 @@ function createChunkStore(db, opts = {}) {
     }
 
     function sizeValue(key) {
-        const row = kvGet.get(key);
+        const row = kvInfo.get(CHUNK_MARKER.length, CHUNK_MARKER, key);
         if (!row) return null;
-        if (isChunked(row.value)) return selSize.get(key).n;
-        return row.value.length;
+        if (row.chunked) return selSize.get(key).n;
+        return row.size;
     }
 
     // Marginal disk cost of a (snapshot) key relative to baseKey (the live blob):
     // raw value → its full length; chunked → bytes of chunks not shared with base.
     // A snapshot identical to base costs ~0; a divergent one costs its real delta.
     function snapshotCost(key, baseKey) {
-        const row = kvGet.get(key);
+        const row = kvInfo.get(CHUNK_MARKER.length, CHUNK_MARKER, key);
         if (!row) return 0;
-        if (!isChunked(row.value)) return row.value.length;
+        if (!row.chunked) return row.size;
         return selMarginal.get(key, baseKey).n;
     }
 

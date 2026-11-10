@@ -71,7 +71,8 @@ export const openMemoryPresetList = writable(false)
 export const memoryPresetSelectCallback = writable<((value: string) => void) | null>(null)
 export const bookmarkListOpen = writable(false)
 export const MobileGUI = writable(false)
-export const MobileGUIStack = writable(0)
+// Start with local characters; the external Realm is opened explicitly.
+export const MobileGUIStack = writable(1)
 export const MobileSideBar = writable(0)
 export const SettingsMenuIndex = writable(-1)
 // Boot-time backup reminder prompt — set by bootstrap and rendered by

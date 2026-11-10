@@ -746,6 +746,7 @@ export function setDatabase(data:Database){
     data.moduleModelBindings ??= {}
     data.disableMobileDragDrop ??= false
     data.disableToggleBinding ??= false
+    data.hideRealm ??= true
     data.hideAllImages ??= false
     data.hideMessagePageCount ??= false
     data.ImagenModel ??= 'imagen-4.0-generate-001'
@@ -2594,7 +2595,7 @@ export const themePresetTemplate: themePreset = {
     settingsCloseButtonSize: 24,
     showMemoryLimit: false,
     showFirstMessagePages: false,
-    hideRealm: false,
+    hideRealm: true,
     hideAllImages: false,
     hideMessagePageCount: false,
     showFolderName: false,

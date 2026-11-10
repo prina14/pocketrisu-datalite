@@ -1,9 +1,5 @@
 <script lang="ts">
     import { MobileGUIStack, MobileSearch, MobileSideBar, selectedCharID } from "src/ts/stores.svelte";
-    import Settings from "../Setting/Settings.svelte";
-    import RealmMain from "../UI/Realm/RealmMain.svelte";
-    import RealmTosGate from "../UI/Realm/RealmTosGate.svelte";
-    import { risuTosAccepted } from "src/ts/alert";
     import CharacterManager from "../CharacterManager/CharacterManager.svelte";
     import ChatScreen from "../ChatScreens/ChatScreen.svelte";
     import CharConfig from "../SideBars/CharConfig.svelte";
@@ -14,6 +10,10 @@
     import { isLite } from "src/ts/lite";
     
     import { DBState } from 'src/ts/stores.svelte';
+    import LazyBoundary from '../UI/LazyBoundary.svelte';
+
+    const loadSettings = () => import('../Setting/Settings.svelte');
+    const loadRealmBrowser = () => import('../UI/Realm/RealmBrowser.svelte');
 </script>
 
 {#if $MobileSideBar > 0 && $selectedCharID !== -1 && !$isLite}
@@ -52,14 +52,14 @@
     {:else if $selectedCharID !== -1}
         <ChatScreen />
     {:else if $MobileGUIStack === 0}
-        {#if $risuTosAccepted}
-            <RealmMain />
-        {:else}
-            <RealmTosGate />
-        {/if}
+        <LazyBoundary load={loadRealmBrowser} close={() => { $MobileGUIStack = 1; }}>
+            {#snippet children(RealmBrowser)}<RealmBrowser />{/snippet}
+        </LazyBoundary>
     {:else if $MobileGUIStack === 1}
         <CharacterManager inline externalSearch={$MobileSearch} />
     {:else if $MobileGUIStack === 2}
-        <Settings />
+        <LazyBoundary load={loadSettings} close={() => { $MobileGUIStack = 1; }}>
+            {#snippet children(Settings)}<Settings />{/snippet}
+        </LazyBoundary>
     {/if}
 </div>

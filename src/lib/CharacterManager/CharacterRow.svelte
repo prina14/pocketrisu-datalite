@@ -47,7 +47,7 @@
         {#await getCharImage(entry.image, 'plain')}
             <div class="h-10 w-10 bg-skin-border" class:rounded-md={!DBState.db.roundIcons} class:rounded-full={DBState.db.roundIcons}></div>
         {:then src}
-            <img src={src || '/none.webp'} alt="" class="h-10 w-10 object-cover object-top bg-skin-border" class:rounded-md={!DBState.db.roundIcons} class:rounded-full={DBState.db.roundIcons} />
+            <img src={src || '/none.webp'} alt="" loading="lazy" decoding="async" class="h-10 w-10 object-cover object-top bg-skin-border" class:rounded-md={!DBState.db.roundIcons} class:rounded-full={DBState.db.roundIcons} />
         {/await}
         {#if entry.archived}
             <div class="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/50" class:rounded-md={!DBState.db.roundIcons} class:rounded-full={DBState.db.roundIcons}>

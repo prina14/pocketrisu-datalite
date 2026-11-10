@@ -172,6 +172,23 @@ describe('createChunkStore — chunk-aware kv (injected :memory: db)', () => {
         expect(store.getValue('nope')).toBeNull()
     })
 
+    it('size-only queries preserve empty, marker-length, and large legacy raw BLOB sizes', () => {
+        const db = freshDb()
+        try {
+            const store = createChunkStore(db, T)
+            const insert = db.prepare('INSERT INTO kv (key, value, updated_at) VALUES (?, ?, 0)')
+            const marker = (pkg as { CHUNK_MARKER: Buffer }).CHUNK_MARKER
+            insert.run('empty', Buffer.alloc(0))
+            insert.run('marker-length', Buffer.alloc(marker.length, 97))
+            // Direct SQL simulates a legacy value that predates chunking.
+            insert.run('large-legacy', Buffer.alloc(32 * 1024 * 1024, 97))
+            for (const [key, size] of [['empty', 0], ['marker-length', marker.length], ['large-legacy', 32 * 1024 * 1024]] as const) {
+                expect(store.sizeValue(key)).toBe(size)
+                expect(store.snapshotCost(key, 'other')).toBe(size)
+            }
+        } finally { db.close() }
+    })
+
     it('B8: 마커와 정확히 같은 raw 값은 빈 버퍼가 아니라 원본 반환 (오탐 방어)', () => {
         const db = freshDb()
         const store = createChunkStore(db, T)
@@ -179,6 +196,9 @@ describe('createChunkStore — chunk-aware kv (injected :memory: db)', () => {
         // 청킹 안 거치고 마커와 동일한 바이트를 직접 박음 (천문학적 우연 시뮬)
         db.prepare('INSERT INTO kv (key, value, updated_at) VALUES (?, ?, 0)').run('k', marker)
         expect((store.getValue('k') as Buffer).equals(marker)).toBe(true)
+        // Keep the existing size/cost semantics for a marker with no manifest.
+        expect(store.sizeValue('k')).toBeNull()
+        expect(store.snapshotCost('k', 'other')).toBe(0)
     })
 
     it('B9: isChunkedKey — 청킹 키 true, raw/없음 false, 마커가 raw로 덮이면 false', () => {

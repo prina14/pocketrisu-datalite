@@ -1,25 +1,23 @@
 <script lang="ts">
     import { DBState } from 'src/ts/stores.svelte';
-    import Hub from "./Realm/RealmMain.svelte";
-    import { OpenRealmStore, RealmInitialOpenChar, openCharacterManager } from "src/ts/stores.svelte";
+    import { OpenRealmStore, openCharacterManager } from "src/ts/stores.svelte";
     import { dbTransferSizeStore, transferSizeWarningDismissed } from "src/ts/transferSize";
     import { ArrowLeft, ChevronDown, MailIcon, SendIcon, TriangleAlertIcon, UsersIcon, XIcon } from "@lucide/svelte";
     import GithubIcon from "./GithubIcon.svelte";
     import { getVersionString, openURL } from "src/ts/globalApi.svelte";
     import { language } from "src/lang";
-    import { getRisuHub, hubAdditionalHTML } from "src/ts/characterCards";
-    import RisuHubIcon from "./Realm/RealmHubIcon.svelte";
-    import RealmTosGate from "./Realm/RealmTosGate.svelte";
-    import { risuTosAccepted } from "src/ts/alert";
     import Title from "./Title.svelte";
     import { updateInfoStore, updatePopupStore } from "src/ts/update";
     import { publicStatsStore } from "src/ts/publicStats";
     import { isSecureContext } from "src/ts/secureContext";
     import { openSettings, SettingsRoute } from "src/ts/routing";
     import ShButton from "./GUI/ShButton.svelte";
-    import CacheUsageCard from './CacheUsageCard.svelte';
+    import LazyBoundary from './LazyBoundary.svelte';
 
-    let realmOpen = $state(!DBState.db.hideRealm);
+    const loadRealmBrowser = () => import('./Realm/RealmBrowser.svelte');
+    const loadRecommendations = () => import('./Realm/RealmRecommendations.svelte');
+    // Missing preferences use the data-saving default; keep an explicit opt-in.
+    let realmOpen = $state(DBState.db.hideRealm === false);
 
     // The home screen is often only passed through: on a phone the user opens
     // the app and goes straight into a chat. Ask the hub for its cards only
@@ -28,6 +26,7 @@
     const HUB_LOAD_DELAY_MS = 1500;
     let hubReady = $state(false);
     $effect(() => {
+      if (!realmOpen || hubReady) return;
       const timer = setTimeout(() => { hubReady = true; }, HUB_LOAD_DELAY_MS);
       return () => clearTimeout(timer);
     });
@@ -72,7 +71,6 @@
     {/if}
     <div class="w-full flex p-4 flex-col text-textcolor max-w-4xl">
       {#if !$OpenRealmStore}
-      <CacheUsageCard />
       {#if !isSecureContext}
         <div class="mt-4 w-full bg-yellow-900/30 border border-yellow-700/40 rounded-md px-4 py-3 flex items-center justify-between gap-3 flex-wrap text-yellow-300">
           <div class="flex items-start gap-2.5 min-w-0 flex-1">
@@ -119,7 +117,11 @@
           class="flex-1 flex items-center gap-2 text-2xl font-bold text-left outline-none focus-visible:ring-2 focus-visible:ring-borderc/50 rounded"
           aria-expanded={realmOpen}
           aria-controls="main-realm-section"
-          onclick={() => (realmOpen = !realmOpen)}
+          onclick={() => {
+            realmOpen = !realmOpen;
+            // A requested list should not wait for the automatic-home delay.
+            if (realmOpen) hubReady = true;
+          }}
         >
           <span>Recently Uploaded</span>
           <ChevronDown
@@ -141,31 +143,10 @@
         aria-hidden={!realmOpen}
         inert={!realmOpen}
       >
-        {#if realmOpen && !$risuTosAccepted}
-          <RealmTosGate />
-        {:else if realmOpen && hubReady}
-          {#await getRisuHub({
-                search: '',
-                page: 0,
-                nsfw: false,
-                sort: 'recommended'
-            }) then charas}
-            {#if charas.length > 0}
-              {@html hubAdditionalHTML}
-              <div class="w-full flex gap-4 p-2 flex-wrap justify-center">
-                  {#each charas as chara}
-                      <RisuHubIcon onClick={() => {
-                        $OpenRealmStore = true
-                        if(DBState.db.realmDirectOpen){
-                            $RealmInitialOpenChar = chara
-                        }
-                      }} chara={chara} />
-                  {/each}
-              </div>
-            {:else}
-              <div class="text-textcolor2">Failed to load {language.hub}...</div>
-            {/if}
-          {/await}
+        {#if realmOpen && hubReady}
+          <LazyBoundary load={loadRecommendations} close={() => { realmOpen = false; }}>
+            {#snippet children(Recommendations)}<Recommendations />{/snippet}
+          </LazyBoundary>
         {/if}
       </div>
       <div class="mt-4 mb-4 w-full border-t border-t-selected"></div>
@@ -233,11 +214,9 @@
             <ArrowLeft/>
           </button>
         </div>
-        {#if $risuTosAccepted}
-          <Hub />
-        {:else}
-          <RealmTosGate />
-        {/if}
+        <LazyBoundary load={loadRealmBrowser} close={() => { $OpenRealmStore = false; }}>
+          {#snippet children(RealmBrowser)}<RealmBrowser />{/snippet}
+        </LazyBoundary>
       {/if}
   </div>
 </div>

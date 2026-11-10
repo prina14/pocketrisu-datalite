@@ -59,7 +59,7 @@
 
   import { sideBarSize } from "src/ts/gui/guisize";
   import DevTool from "./DevTool.svelte";
-    import QuickSettingsGui from "../Others/QuickSettingsGUI.svelte";
+    import LazyBoundary from "../UI/LazyBoundary.svelte";
     import PluginDefinedIcon from "../Others/PluginDefinedIcon.svelte";
   const isTouchDevice = typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches;
   const touchDragEnabled = $derived(isTouchDevice && !DBState.db.disableMobileDragDrop);
@@ -70,6 +70,7 @@
   let editMode = $state(false);
   let menuMode = $state(0);
   let devTool = $state(false)
+  const loadQuickSettings = () => import('../Others/QuickSettingsGUI.svelte');
 
   function reseter() {
     menuMode = 0;
@@ -1254,7 +1255,11 @@
         {/if}
       </div>
       {#if QuickSettings.open}
-        <QuickSettingsGui />
+        <LazyBoundary load={loadQuickSettings} close={() => { QuickSettings.open = false; }}>
+          {#snippet children(QuickSettingsGui)}
+            <QuickSettingsGui />
+          {/snippet}
+        </LazyBoundary>
       {:else if devTool}
         <DevTool />
       {:else if $botMakerMode}

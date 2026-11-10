@@ -4393,10 +4393,6 @@ async function readStorage(req, res, next) {
         if (deltaRead && !isDb && !isPlugin) return res.status(400).json({ error: 'Unsupported read delta key' });
         res.setHeader('x-read-resource', isDb ? 'database' : isPlugin ? 'plugin-storage' : 'other');
         res.setHeader('x-read-transfer', 'full');
-        // Flush pending patches before reading database.bin
-        if (key === 'database/database.bin') {
-            await flushPendingDb();
-        }
         if (req.headers['x-read-check-only'] === '1' && (isDb || isPlugin)) {
             res.setHeader('x-read-transfer', 'revision-check');
             const revision = readRevision(key);
@@ -4409,6 +4405,10 @@ async function readStorage(req, res, next) {
             // No blob reads, serialization or hash calculation in this path.
             return res.status(200).end();
         }
+        // Metadata probes above include the in-memory view/ETag in their
+        // revision, so acknowledged patches invalidate them without forcing
+        // a full DB encode/write. Body reads still flush before serving data.
+        if (isDb) await flushPendingDb();
         let value = null;
         if (isDb) {
             // The cached client view already excludes chat bodies. Reading the

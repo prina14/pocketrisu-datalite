@@ -36,7 +36,6 @@
     import { getCurrentCharacter, type TogglePreset, applyToggleValues, snapshotCurrentToggleValues } from "src/ts/storage/database.svelte";
     import { alertInput, alertConfirm, alertError, alertNormalWait, notifySuccess, RISU_TOS_ACCEPT_RESULT } from "src/ts/alert";
     import { selectSingleFile } from "src/ts/util";
-    import { translateStackTrace } from "../../ts/sourcemap";
     import { getDetailedOSLabel, getFallbackOSLabel, getRisuEnvironmentLabel } from "src/ts/platform";
 
     let showDetails = $state(false);
@@ -159,6 +158,7 @@
         if (isTranslating || translatedStackTrace || stackTraceTranslationFailed || !$alertStore.stackTrace) return;
         isTranslating = true;
         try {
+            const { translateStackTrace } = await import('../../ts/sourcemap');
             const result = await translateStackTrace($alertStore.stackTrace);
             if (result.didTranslate) {
                 translatedStackTrace = result.stackTrace;

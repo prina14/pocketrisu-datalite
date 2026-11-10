@@ -21,6 +21,7 @@ function storage(fetcher: any) {
 }
 beforeEach(() => {
     vi.clearAllMocks()
+    delete transferCache.putBatch // Older adapters/mocks keep their per-key API.
     copies.clear()
     vi.mocked(transferCache.get).mockImplementation(async k => copies.get(k) ?? null)
     vi.mocked(transferCache.put).mockImplementation(async (key, etag, data, revision) => { copies.set(key, { key, etag, data, revision }) })
@@ -93,6 +94,59 @@ describe('validated boot copies', () => {
 })
 
 describe('plugin delta preload', () => {
+    function batchWriter() {
+        const write = vi.fn(async (rows: any[]) => {
+            for (const row of rows) copies.set(row.key, { ...row })
+        })
+        transferCache.putBatch = write
+        return write
+    }
+    test('a cold 100-key preload writes bounded batches and flushes the last partial batch', async () => {
+        const write = batchWriter()
+        const rows = Array.from({ length: 100 }, (_, i) => [`key-${i}`, JSON.stringify(`value-${i}`), `h${i}`, `r${i}`])
+        const fetcher = vi.fn().mockResolvedValue(ndjson([...rows, { done: true }]))
+        const onEntry = vi.fn()
+        await storage(fetcher).getPluginStorageAll(onEntry)
+        expect(onEntry).toHaveBeenCalledTimes(100)
+        expect(write.mock.calls.map(([rows]) => rows.length)).toEqual([32, 32, 32, 4])
+        expect(transferCache.put).not.toHaveBeenCalled()
+        expect(copies.get('plugin:key-99')).toMatchObject({ etag: 'h99', revision: 'r99' })
+        expect(new TextDecoder().decode(copies.get('plugin:key-99').data)).toBe('"value-99"')
+        expect(fetcher).toHaveBeenCalledTimes(1)
+    })
+    test('preload write staging is byte-bounded and oversized values are written alone', async () => {
+        const write = batchWriter()
+        const a = 'a'.repeat(700 * 1024), b = 'b'.repeat(700 * 1024), big = 'c'.repeat(2 * 1024 * 1024)
+        const fetcher = vi.fn().mockResolvedValue(ndjson([
+            ['a', a, 'a'], ['b', b, 'b'], ['big', big, 'big'], ['small', '1', 'small'], { done: true },
+        ]))
+        await storage(fetcher).getPluginStorageAll(() => {})
+        expect(write.mock.calls.map(([rows]) => rows.length)).toEqual([1, 1, 1])
+        for (const [rows] of write.mock.calls) {
+            expect(rows.reduce((total, row) => total + row.data.byteLength, 0)).toBeLessThanOrEqual(1024 * 1024)
+        }
+        expect(transferCache.put).toHaveBeenCalledTimes(1)
+        expect(vi.mocked(transferCache.put).mock.calls[0][0]).toBe('plugin:big')
+        expect(copies.get('plugin:big').data.byteLength).toBe(big.length)
+    })
+    test('an incomplete stream keeps existing copies and caches only its validated rows', async () => {
+        const write = batchWriter()
+        copies.set('plugin:existing', { key: 'plugin:existing', etag: 'old', data: bytes('old') })
+        const s = storage(vi.fn().mockResolvedValue(ndjson([['a', '1', 'h1', 'r1']])))
+        await expect(s.getPluginStorageAll(() => {})).rejects.toThrow('Incomplete plugin sync')
+        expect(write).toHaveBeenCalledTimes(1)
+        expect(copies.get('plugin:existing').etag).toBe('old')
+        expect(copies.get('plugin:a').revision).toBe('r1')
+    })
+    test('a repeated conditional stream key can reuse a preceding queued row', async () => {
+        const write = batchWriter()
+        const fetcher = vi.fn().mockResolvedValue(ndjson([['a', '1', 'h1', 'r1'], ['a', null, null, 'r1'], { done: true }]))
+        const onEntry = vi.fn()
+        await storage(fetcher).getPluginStorageAll(onEntry)
+        expect(onEntry.mock.calls).toEqual([['a', '1'], ['a', '1']])
+        expect(write).toHaveBeenCalledTimes(1)
+        expect(fetcher).toHaveBeenCalledTimes(1)
+    })
     test('revision-only rows reuse plugin values without requiring content hashes from the server', async () => {
         copies.set('plugin:a', { key: 'plugin:a', etag: 'sha', revision: 'r1', data: bytes('"cached"') })
         const fetcher = vi.fn().mockResolvedValue(ndjson([['a', null, null, 'r1'], { done: true }]))

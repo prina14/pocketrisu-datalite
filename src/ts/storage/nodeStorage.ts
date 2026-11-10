@@ -10,7 +10,7 @@ import { alertInput, waitAlert, notifyError } from "../alert"
 import { decodeRisuSave, encodeRisuSaveLegacy } from "./risuSave"
 import { normalizeChat } from "./database.svelte"
 import type { PatchServerTimings } from "./saveMetrics"
-import { transferCache } from './transferCache'
+import { transferCache, type TransferCopyInput } from './transferCache'
 import { Sha256 } from '@aws-crypto/sha256-js'
 import { gzipSync } from 'fflate'
 import { MIN_DELTA_BYTES, makeManifest, applyDelta } from '../../../server/node/readDelta.mjs'
@@ -1150,6 +1150,30 @@ export class NodeStorage{
         const encoder = new TextEncoder()
         let buffer = ''
         let complete = false
+        // Bound cache-write staging, not the V2 plugin's own required memory.
+        // Large individual values use the existing per-key writer immediately.
+        const CACHE_BATCH_ENTRIES = 32
+        const CACHE_BATCH_BYTES = 1024 * 1024
+        let cacheBatch: TransferCopyInput[] = []
+        let cacheBatchBytes = 0
+        const flushCacheBatch = async () => {
+            if (!cacheBatch.length) return
+            const pending = cacheBatch
+            cacheBatch = []
+            cacheBatchBytes = 0
+            if (transferCache.putBatch) await transferCache.putBatch(pending)
+            else for (const copy of pending) await transferCache.put(copy.key, copy.etag, copy.data, copy.revision)
+        }
+        const cacheEntry = async (copy: TransferCopyInput) => {
+            if (cacheBatch.length && (cacheBatch.length >= CACHE_BATCH_ENTRIES || cacheBatchBytes + copy.data.byteLength > CACHE_BATCH_BYTES)) await flushCacheBatch()
+            if (copy.data.byteLength > CACHE_BATCH_BYTES) {
+                await transferCache.put(copy.key, copy.etag, copy.data, copy.revision)
+                return
+            }
+            cacheBatch.push(copy)
+            cacheBatchBytes += copy.data.byteLength
+            if (cacheBatch.length >= CACHE_BATCH_ENTRIES || cacheBatchBytes >= CACHE_BATCH_BYTES) await flushCacheBatch()
+        }
         const ingest = async (line: string) => {
             const row = JSON.parse(line)
             if (delta && row?.done === true) { complete = true; return }
@@ -1159,6 +1183,9 @@ export class NodeStorage{
                 (delta && typeof row[2] !== 'string' && !(row[2] === null && typeof row[3] === 'string'))) throw new Error('Invalid plugin sync entry')
             const [key, text, etag, revision] = row
             if (text === null || readDelta) {
+                // Preserve the previous per-row semantics if a server ever
+                // repeats a key later in its stream with a conditional row.
+                if (cacheBatch.some(copy => copy.key === prefix + key)) await flushCacheBatch()
                 const copy = !readDelta ? await transferCache.get(prefix + key) : null
                 if (copy && (revision ? copy.revision === revision : copy.etag === etag)) {
                     onEntry(key, new TextDecoder().decode(copy.data))
@@ -1172,7 +1199,7 @@ export class NodeStorage{
                 }
             } else {
                 onEntry(key, text)
-                if (delta) await transferCache.put(prefix + key, etag, encoder.encode(text), revision)
+                if (delta) await cacheEntry({ key: prefix + key, etag, data: encoder.encode(text), revision })
             }
         }
         try {
@@ -1191,8 +1218,14 @@ export class NodeStorage{
             if (buffer.trim()) await ingest(buffer)
             if (delta && !complete) throw new Error('Incomplete plugin sync')
         } finally {
-            await reader.cancel().catch(() => {})
-            reader.releaseLock()
+            try {
+                // Validated rows remain useful even if the stream disconnects.
+                // This never prunes copies merely because keys were not received.
+                await flushCacheBatch()
+            } finally {
+                await reader.cancel().catch(() => {})
+                reader.releaseLock()
+            }
         }
     }
 

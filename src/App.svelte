@@ -1,14 +1,11 @@
 <script lang="ts">
-    import { DynamicGUI, settingsOpen, sideBarStore, openPresetList, openCharacterManager, openModelPresetList, openModelProfileBrowser, openPersonaList, personaSelectCallback, openMemoryPresetList, memoryPresetSelectCallback, openThemePresetList, MobileGUI, loadedStore, accountImportBlocking, alertStore, LoadingStatusState, bookmarkListOpen, popupStore, popUpEditorStore } from './ts/stores.svelte';
+    import { DynamicGUI, settingsOpen, sideBarStore, openPresetList, presetSelectCallback, openCharacterManager, openModelPresetList, modelPresetSelectCallback, openModelProfileBrowser, openPersonaList, personaSelectCallback, openMemoryPresetList, memoryPresetSelectCallback, openThemePresetList, MobileGUI, loadedStore, accountImportBlocking, alertStore, LoadingStatusState, bookmarkListOpen, popupStore, popUpEditorStore } from './ts/stores.svelte';
     import Sidebar from './lib/SideBars/Sidebar.svelte';
     import { DBState } from './ts/stores.svelte';
     import ChatScreen from './lib/ChatScreens/ChatScreen.svelte';
     import AlertComp from './lib/Others/AlertComp.svelte';
-    import RealmPopUp from './lib/UI/Realm/RealmPopUp.svelte';
     import CharacterManager from './lib/CharacterManager/CharacterManager.svelte';
     import FolderSettingsDialog from './lib/CharacterManager/FolderSettingsDialog.svelte';
-    import BookmarkList from './lib/Others/BookmarkList.svelte';
-    import Settings from './lib/Setting/Settings.svelte';
     import RisuAccountImportScreen from './lib/Setting/RisuAccountImportScreen.svelte';
     import { showRealmInfoStore, importCharacterProcess } from './ts/characterCards';
     import { importPreset, getDatabase, setDatabase } from './ts/storage/database.svelte';
@@ -16,24 +13,15 @@
     import { notifySuccess } from './ts/alert';
     import { language } from './lang';
     import SavePopupIconComp from './lib/Others/SavePopupIcon.svelte';
-    import Botpreset from './lib/Setting/botpreset.svelte';
-    import Modelpreset from './lib/Setting/modelpreset.svelte';
-    import ModelProfileBrowser from './lib/Setting/modelProfileBrowser.svelte';
-    import Themepreset from './lib/Setting/themepreset.svelte';
-    import ListedPersona from './lib/Setting/listedPersona.svelte';
-    import ListedMemoryPreset from './lib/Setting/listedMemoryPreset.svelte';
     import MobileHeader from './lib/Mobile/MobileHeader.svelte';
     import MobileBody from './lib/Mobile/MobileBody.svelte';
     import MobileFooter from './lib/Mobile/MobileFooter.svelte';
     import { checkCharOrder } from './ts/globalApi.svelte';
     import { ArrowUpIcon, GlobeIcon, PlusIcon } from '@lucide/svelte';
     import { hypaV3ModalOpen, hypaV3ProgressStore } from "./ts/stores.svelte";
-    import { assetViewerStore } from './ts/assetViewer.svelte';
-    import AssetViewer from './lib/Others/AssetViewer.svelte';
-    import HypaV3Modal from './lib/Others/HypaV3Modal.svelte';
+    import { assetViewerStore, closeAssetViewer } from './ts/assetViewer.svelte';
     import HypaV3Progress from './lib/Others/HypaV3Progress.svelte';
     import PluginAlertModal from './lib/Others/PluginAlertModal.svelte';
-    import PopupEditor from './lib/Others/PopupEditor.svelte';
     import UpdatePopup from './lib/Others/UpdatePopup.svelte';
     import SupportDialog from './lib/Others/SupportDialog.svelte';
     import ProtonImportDialog from './lib/Others/ProtonImportDialog.svelte';
@@ -45,6 +33,40 @@
     import { createKeepAliveAudio } from './ts/keepAliveAudio';
     import { RISU_APP_INTERNAL_DRAG_TYPE, RISU_SIDEBAR_DRAG_TYPE } from './ts/dragTypes';
     import ServerActivityNotice from './lib/Others/ServerActivityNotice.svelte';
+    import LazyBoundary from './lib/UI/LazyBoundary.svelte';
+
+    const loadSettings = () => import('./lib/Setting/Settings.svelte');
+    const loadModelProfileBrowser = () => import('./lib/Setting/modelProfileBrowser.svelte');
+    const loadHypaV3Modal = () => import('./lib/Others/HypaV3Modal.svelte');
+    const loadRealmPopUp = () => import('./lib/UI/Realm/RealmPopUp.svelte');
+    const loadBotpreset = () => import('./lib/Setting/botpreset.svelte');
+    const loadModelpreset = () => import('./lib/Setting/modelpreset.svelte');
+    const loadThemepreset = () => import('./lib/Setting/themepreset.svelte');
+    const loadListedPersona = () => import('./lib/Setting/listedPersona.svelte');
+    const loadListedMemoryPreset = () => import('./lib/Setting/listedMemoryPreset.svelte');
+    const loadBookmarkList = () => import('./lib/Others/BookmarkList.svelte');
+    const loadAssetViewer = () => import('./lib/Others/AssetViewer.svelte');
+    const loadPopupEditor = () => import('./lib/Others/PopupEditor.svelte');
+
+    const closePresetList = () => { $openPresetList = false; $presetSelectCallback = null; };
+    const closeModelPresetList = () => { $openModelPresetList = false; $modelPresetSelectCallback = null; };
+    const closePersonaList = () => { $openPersonaList = false; $personaSelectCallback = null; };
+    const closeMemoryPresetList = () => { $openMemoryPresetList = false; $memoryPresetSelectCallback = null; };
+
+    // The picker may be closed by a hotkey before its module has mounted.
+    // Keep callback cleanup in the owner as well as in each loaded picker.
+    $effect(() => {
+        if ($openPresetList) return () => { presetSelectCallback.set(null); };
+    });
+    $effect(() => {
+        if ($openModelPresetList) return () => { modelPresetSelectCallback.set(null); };
+    });
+    $effect(() => {
+        if ($openPersonaList) return () => { personaSelectCallback.set(null); };
+    });
+    $effect(() => {
+        if ($openMemoryPresetList) return () => { memoryPresetSelectCallback.set(null); };
+    });
 
     let aprilFools = $state(new Date().getMonth() === 3 && new Date().getDate() === 1)
     let aprilFoolsPage = $state(0)
@@ -223,7 +245,9 @@
             <span class="text-sm mt-2 text-textcolor2">{LoadingStatusState.text}</span>
         </div>
     {:else if $settingsOpen}
-        <Settings />
+        <LazyBoundary load={loadSettings} close={() => { $settingsOpen = false; }}>
+            {#snippet children(Settings)}<Settings />{/snippet}
+        </LazyBoundary>
     {:else if $MobileGUI}
         <div class="w-full h-full flex flex-col">
             <MobileHeader />
@@ -246,32 +270,56 @@
     {/if}
     <AlertComp />
     {#if $showRealmInfoStore}
-        <RealmPopUp bind:openedData={$showRealmInfoStore} />
+        <LazyBoundary load={loadRealmPopUp} overlay close={() => { $showRealmInfoStore = null; }}>
+            {#snippet children(RealmPopUp)}<RealmPopUp bind:openedData={$showRealmInfoStore} />{/snippet}
+        </LazyBoundary>
     {/if}
     <FolderSettingsDialog />
     {#if $openPresetList}
-        <Botpreset close={() => {$openPresetList = false}} />
+        <LazyBoundary load={loadBotpreset} overlay close={closePresetList}>
+            {#snippet children(Botpreset)}<Botpreset close={closePresetList} />{/snippet}
+        </LazyBoundary>
     {/if}
     {#if $openModelPresetList}
-        <Modelpreset close={() => {$openModelPresetList = false}} />
+        <LazyBoundary load={loadModelpreset} overlay close={closeModelPresetList}>
+            {#snippet children(Modelpreset)}<Modelpreset close={closeModelPresetList} />{/snippet}
+        </LazyBoundary>
     {/if}
     {#if $openModelProfileBrowser}
-        <ModelProfileBrowser close={() => {$openModelProfileBrowser = false}} />
+        <LazyBoundary load={loadModelProfileBrowser} overlay close={() => { $openModelProfileBrowser = false; }}>
+            {#snippet children(ModelProfileBrowser)}
+                <ModelProfileBrowser close={() => {$openModelProfileBrowser = false}} />
+            {/snippet}
+        </LazyBoundary>
     {/if}
     {#if $openThemePresetList}
-        <Themepreset close={() => {$openThemePresetList = false}} />
+        <LazyBoundary load={loadThemepreset} overlay close={() => { $openThemePresetList = false; }}>
+            {#snippet children(Themepreset)}<Themepreset close={() => { $openThemePresetList = false; }} />{/snippet}
+        </LazyBoundary>
     {/if}
     {#if $openPersonaList}
-        <ListedPersona close={() => {$openPersonaList = false; $personaSelectCallback = null}} onSelect={$personaSelectCallback} />
+        <LazyBoundary load={loadListedPersona} overlay close={closePersonaList}>
+            {#snippet children(ListedPersona)}
+                <ListedPersona close={closePersonaList} onSelect={$personaSelectCallback} />
+            {/snippet}
+        </LazyBoundary>
     {/if}
     {#if $openMemoryPresetList}
-        <ListedMemoryPreset close={() => {$openMemoryPresetList = false; $memoryPresetSelectCallback = null}} onSelect={$memoryPresetSelectCallback} />
+        <LazyBoundary load={loadListedMemoryPreset} overlay close={closeMemoryPresetList}>
+            {#snippet children(ListedMemoryPreset)}
+                <ListedMemoryPreset close={closeMemoryPresetList} onSelect={$memoryPresetSelectCallback} />
+            {/snippet}
+        </LazyBoundary>
     {/if}
     {#if $bookmarkListOpen}
-        <BookmarkList />
+        <LazyBoundary load={loadBookmarkList} overlay close={() => { $bookmarkListOpen = false; }}>
+            {#snippet children(BookmarkList)}<BookmarkList />{/snippet}
+        </LazyBoundary>
     {/if}
     {#if $hypaV3ModalOpen}
-        <HypaV3Modal />
+        <LazyBoundary load={loadHypaV3Modal} overlay close={() => { $hypaV3ModalOpen = false; }}>
+            {#snippet children(HypaV3Modal)}<HypaV3Modal />{/snippet}
+        </LazyBoundary>
     {/if}
     <SavePopupIconComp />
     {#if $hypaV3ProgressStore.open}
@@ -287,10 +335,14 @@
         <PopupList />
     {/if}
     {#if popUpEditorStore.open}
-        <PopupEditor />
+        <LazyBoundary load={loadPopupEditor} overlay close={() => { popUpEditorStore.open = false; }}>
+            {#snippet children(PopupEditor)}<PopupEditor />{/snippet}
+        </LazyBoundary>
     {/if}
     {#if assetViewerStore.open}
-        <AssetViewer />
+        <LazyBoundary load={loadAssetViewer} overlay close={closeAssetViewer}>
+            {#snippet children(AssetViewer)}<AssetViewer />{/snippet}
+        </LazyBoundary>
     {/if}
     <Toaster />
     <RequestStatusToaster />

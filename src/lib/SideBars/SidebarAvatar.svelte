@@ -109,6 +109,8 @@
       {:then img}
         <img
           src={img}
+          loading="lazy"
+          decoding="async"
           class="bg-skin-border sidebar-avatar sidebar-touch-target rounded-md object-cover object-top"
           style:width={size + "px"}
           style:height={size + "px"}

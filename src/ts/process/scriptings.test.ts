@@ -64,6 +64,17 @@ beforeAll(async () => {
   runLuaInteractionTrigger = scriptings.runLuaInteractionTrigger
 })
 
+test('concurrent first Lua calls share initialization and wait for the JSON helper before running hooks', async () => {
+  expect(fetch).not.toHaveBeenCalled()
+  const results = await Promise.all(['startupOne', 'startupTwo'].map((mode) => runScripted(
+    `function ${mode}() return json.decode('{"ready":true}').ready end`,
+    { char: {} as never, chat: { message: [] } as never, mode }
+  )))
+
+  expect(results.map(result => result.res)).toEqual([true, true])
+  expect(vi.mocked(fetch).mock.calls.filter(([url]) => url === '/lua/json.lua')).toHaveLength(1)
+})
+
 test('does not stop generation when setStateChanged is a no-op', async () => {
   const result = await runScripted(
     `

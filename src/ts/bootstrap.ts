@@ -32,6 +32,7 @@ import { registerModelDynamic } from "./model/modellist";
 import { initModelJobRecovery } from "./process/request/jobRecovery";
 import { convertStubsToPlaceholders } from "./storage/chatStorage";
 import { isChatStub, purgeUnsupportedGroupChats } from "./storage/database.svelte";
+import { beginStartupPhase, measureStartupPhase, readBootBackupReminderEnabled, scheduleAfterFirstPaint } from './startup';
 
 /**
  * Loads the application data.
@@ -39,14 +40,16 @@ import { isChatStub, purgeUnsupportedGroupChats } from "./storage/database.svelt
 export async function loadData() {
     const loaded = get(loadedStore)
     if (!loaded) {
+        const finishStartup = beginStartupPhase('load-data')
         try {
             applyEarlyLanguage()
             // A started RisuAI account import will replace all data, so the
             // app shows only its screen until it ends. When the status cannot
             // be read the boot goes on; the server still refuses every write.
             try {
-                if ((await forageStorage.getRisuAccountImportStatus()).blocking) {
+                if ((await measureStartupPhase('import-status', () => forageStorage.getRisuAccountImportStatus())).blocking) {
                     accountImportBlocking.set(true)
+                    finishStartup()
                     return
                 }
             } catch (error) {
@@ -54,10 +57,10 @@ export async function loadData() {
             }
             let createdFreshDatabase = false
             {
-                await forageStorage.Init()
+                await measureStartupPhase('storage-init', () => forageStorage.Init())
 
                 LoadingStatusState.text = "Loading Local Save File..."
-                let gotStorage: Uint8Array = await forageStorage.getItem('database/database.bin') as unknown as Uint8Array
+                let gotStorage: Uint8Array = await measureStartupPhase('database-read', () => forageStorage.getItem('database/database.bin')) as unknown as Uint8Array
                 LoadingStatusState.text = "Decoding Local Save File..."
                 if (checkNullish(gotStorage)) {
                     createdFreshDatabase = true
@@ -65,11 +68,13 @@ export async function loadData() {
                     await forageStorage.setItem('database/database.bin', gotStorage)
                 }
                 try {
-                    const decoded = await decodeRisuSave(gotStorage)
+                    const decoded = await measureStartupPhase('database-decode', () => decodeRisuSave(gotStorage))
                     // setPatchSyncBaseline owns its defensive clone. Cloning at
                     // both call sites briefly held two full DB copies at boot.
-                    setPatchSyncBaseline(decoded)
-                    setDatabase(decoded)
+                    await measureStartupPhase('database-apply', () => {
+                        setPatchSyncBaseline(decoded)
+                        setDatabase(decoded)
+                    })
                     // /api/read serves the chat-stripped blob — the same shape a
                     // full write sends — so its length is a first estimate of the
                     // transfer size until the first save measures the real payload.
@@ -125,21 +130,16 @@ export async function loadData() {
                     changeLanguage(mappedLanguage)
                 }
             }
+            // This read is independent of plugin initialization. Start it now,
+            // but keep any reminder prompt at the original pre-interactive point.
+            const bootReminderEnabled = measureStartupPhase('backup-reminder-config', () =>
+                readBootBackupReminderEnabled(() => forageStorage.createAuth(), fetchWithTimeout))
             LoadingStatusState.text = "Loading Plugins..."
             try {
-                await loadPlugins()
+                await measureStartupPhase('plugins', () => loadPlugins())
             } catch (error) { }
-            try {
-                //@ts-expect-error navigator.standalone is iOS Safari non-standard property, not in Navigator interface
-                const isInStandaloneMode = (window.matchMedia('(display-mode: standalone)').matches) || (window.navigator.standalone) || document.referrer.includes('android-app://');
-                if (isInStandaloneMode) {
-                    await navigator.storage.persist()
-                }
-            } catch (error) {
-
-            }
             LoadingStatusState.text = "Checking For Format Update..."
-            await checkNewFormat()
+            await measureStartupPhase('format-update', () => checkNewFormat())
 
             // Convert any ChatStubs (from server-stripped database.bin) to placeholder Chats
             // so runtime code only sees Chat objects
@@ -175,11 +175,12 @@ export async function loadData() {
             // non-fatal — boot must always proceed even if the reminder fetch
             // or backup itself fails.
             try {
-                await maybeRunBootBackupReminder()
+                await measureStartupPhase('backup-reminder', () => maybeRunBootBackupReminder(bootReminderEnabled))
             } catch (err) {
                 console.warn('[bootstrap] boot backup reminder failed:', err)
             }
             loadedStore.set(true)
+            finishStartup()
 
             selectedCharID.set(-1)
 
@@ -215,17 +216,30 @@ export async function loadData() {
             setTimeout(() => {
                 cleanChunks().catch(console.error)
             }, 5_000)
-            checkRisuUpdate()
-            fetchPublicStats()
+            scheduleAfterFirstPaint([
+                requestStoragePersistence,
+                checkRisuUpdate,
+                fetchPublicStats,
+            ])
             // Server-side model-job recovery (jobRecovery.ts): slot journaled
             // responses from disconnected generations back into their chats.
             // Installs the return triggers (visibility / online) and runs the
             // first pass. Fire-and-forget — never throws, no-op without jobs.
             initModelJobRecovery()
         } catch (error) {
+            finishStartup()
             alertError(error)
         }
     }
+}
+
+async function requestStoragePersistence() {
+    // A permission/storage request is not a prerequisite for opening the app.
+    try {
+        //@ts-expect-error navigator.standalone is iOS Safari non-standard property, not in Navigator interface
+        const standalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone || document.referrer.includes('android-app://')
+        if (standalone) await navigator.storage?.persist?.()
+    } catch { /* Browser policy or HTTP origin: optional. */ }
 }
 
 
@@ -251,18 +265,8 @@ async function fetchWithTimeout(input: RequestInfo, init: RequestInit = {}, ms =
  * confirm dialog before the main UI loads. Confirming runs SaveServerBackup
  * synchronously (its alertWait progress overlays the loading screen).
  */
-async function maybeRunBootBackupReminder() {
-    let enabled = false
-    try {
-        const auth = await forageStorage.createAuth()
-        const res = await fetchWithTimeout('/api/backup/boot-reminder', { headers: { 'risu-auth': auth } })
-        if (!res.ok) return
-        const json = await res.json()
-        enabled = !!json.enabled
-    } catch {
-        return  // Non-fatal — skip the prompt if the endpoint is unreachable / slow.
-    }
-    if (!enabled) return
+async function maybeRunBootBackupReminder(enabled: Promise<boolean>) {
+    if (!await enabled) return
 
     // Best-effort stats fetch. The prompt component renders whatever we can
     // supply; missing values just hide their respective lines. Uses
