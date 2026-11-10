@@ -12,6 +12,7 @@ const fs = require('fs/promises')
 const nodeCrypto = require('crypto')
 const zlib = require('zlib')
 const { MIN_DELTA_BYTES, MAX_COPY_BYTES, validManifest, makeDelta } = require('./readDelta.mjs');
+const { compareReadDeltaGzip } = require('./read-delta-compression.cjs');
 const rateLimit = require('express-rate-limit')
 const { WebSocketServer } = require('ws')
 const Vips = require('wasm-vips')
@@ -3993,24 +3994,42 @@ app.get('/api/server-activity', async (req, res) => {
 //     }
 // })
 
-app.get('/api/test_auth', async(req, res) => {
-
-    if(!password){
-        res.send({status: 'unset'})
-    }
-    else if(!await checkAuth(req, res, true)){
-        // JWT missing/invalid – fall back to session cookie (survives page refresh)
-        const sessionToken = parseSessionCookie(req)
-        if (sessionToken && (sessions.get(sessionToken) ?? 0) > Date.now()) {
-            res.send({status: 'success', token: createServerJwt()})
-        } else {
-            res.send({status: 'incorrect'})
+app.get('/api/test_auth', async(req, res, next) => {
+    // JWTs and the optional boot snapshot must never be served from HTTP cache.
+    res.setHeader('Cache-Control', 'private, no-store');
+    const started = performance.now();
+    try {
+        if (!password) return res.json({ status: 'unset' });
+        const jwtValid = await checkAuth(req, res, true);
+        const sessionToken = parseSessionCookie(req);
+        // Same cookie fallback as before: never issue a token/session/status
+        // to an unauthenticated request, even when it asks for a boot bundle.
+        if (!jwtValid && !(sessionToken && (sessions.get(sessionToken) ?? 0) > Date.now())) {
+            return res.json({ status: 'incorrect' });
         }
+        const result = { status: 'success', token: createServerJwt() };
+        const id = req.headers['x-session-id'];
+        if (req.headers['x-risu-bootstrap'] === '1' && typeof id === 'string' && id !== '') {
+            res.append('Server-Timing', `boot-auth;dur=${(performance.now() - started).toFixed(2)}`);
+            const sessionStarted = performance.now();
+            await issueSession(req, res);
+            res.append('Server-Timing', `boot-session;dur=${(performance.now() - sessionStarted).toFixed(2)}`);
+            result.bootstrap = { v: 1, sessionInitialized: true, backupReminderEnabled: readBootReminder() };
+            const statusStarted = performance.now();
+            try {
+                result.bootstrap.importStatus = await risuAccountImport.status();
+            } catch (error) {
+                // Authentication/session still succeeded. The client falls
+                // back to a fresh status read before any database processing.
+                logger.warn('[Bootstrap] Import status unavailable:', error?.message || error);
+            }
+            res.append('Server-Timing', `boot-status;dur=${(performance.now() - statusStarted).toFixed(2)}`);
+        }
+        res.json(result);
+    } catch (error) {
+        next(error);
     }
-    else{
-        res.send({status: 'success', token: createServerJwt()})
-    }
-})
+});
 
 app.post('/api/login', loginRouteLimiter, async (req, res) => {
     if(password === ''){
@@ -4076,8 +4095,9 @@ app.post('/api/session/claim', async (req, res) => {
 // ── Session cookie issuance (F-0) ──────────────────────────────────────────
 // Called once after JWT auth succeeds. Issues a long-lived cookie so that
 // <img src="/api/asset/..."> requests can be authenticated without JS.
-app.post('/api/session', async (req, res) => {
-    if (!await checkAuth(req, res)) return
+// Called only after JWT or the existing session-cookie fallback is verified.
+// Both boot paths must wait for accepted writes before registering the page.
+async function issueSession(req, res) {
     const clientSessionId = req.headers['x-session-id']
     if (typeof clientSessionId === 'string') {
         // Registers the boot; takes the lock only if nobody holds it. The
@@ -4097,6 +4117,11 @@ app.post('/api/session', async (req, res) => {
     saveSessions()
     const maxAge = 7 * 24 * 60 * 60 // seconds
     res.setHeader('Set-Cookie', `risu-session=${token}; HttpOnly; SameSite=Strict; Max-Age=${maxAge}; Path=/`)
+}
+
+app.post('/api/session', async (req, res) => {
+    if (!await checkAuth(req, res)) return
+    await issueSession(req, res)
     res.json({ ok: true })
 })
 
@@ -4367,9 +4392,16 @@ app.post('/api/set_password', async (req, res) => {
 })
 
 async function readStorage(req, res, next) {
+    let phaseStarted = performance.now();
+    const recordPhase = name => {
+        const now = performance.now();
+        if (!res.headersSent) res.append('Server-Timing', `${name};dur=${(now - phaseStarted).toFixed(2)}`);
+        phaseStarted = now;
+    };
     if(!await checkAuth(req, res)){
         return;
     }
+    recordPhase('read-auth');
     // This URL serves many different keys selected by a header. Do not let
     // an HTTP cache reuse one key's response for another. Local copies are
     // explicitly validated after authentication on every read.
@@ -4398,6 +4430,7 @@ async function readStorage(req, res, next) {
             const revision = readRevision(key);
             if (revision) res.setHeader('x-read-revision', revision);
             res.setHeader('x-read-version-check', '1');
+            recordPhase('read-revision');
             if (revision && req.headers['if-read-revision'] === revision) {
                 res.setHeader('x-read-transfer', 'unchanged');
                 return res.status(304).end();
@@ -4409,6 +4442,7 @@ async function readStorage(req, res, next) {
         // revision, so acknowledged patches invalidate them without forcing
         // a full DB encode/write. Body reads still flush before serving data.
         if (isDb) await flushPendingDb();
+        recordPhase('read-flush');
         let value = null;
         if (isDb) {
             // The cached client view already excludes chat bodies. Reading the
@@ -4423,7 +4457,9 @@ async function readStorage(req, res, next) {
                     const loaded = await queueStorageOperation(() => loadDbCacheIfMissing({ createBackup: true }));
                     if (!loaded) return res.send();
                 }
+                recordPhase('read-load');
                 value = Buffer.from(encodeRisuSaveLegacy(dbCache[filePath]));
+                recordPhase('read-encode');
             } catch (e) {
                 logger.error('[Read] Failed to strip chats from database.bin', e);
                 return next(e);
@@ -4436,6 +4472,7 @@ async function readStorage(req, res, next) {
         if (value === null) {
             value = kvGet(key);
         }
+        recordPhase('read-value');
         if (value === null) {
             res.send();
         } else {
@@ -4445,6 +4482,7 @@ async function readStorage(req, res, next) {
                 dbEtag = computeBufferEtag(value);
                 res.setHeader('x-db-etag', dbEtag);
                 res.setHeader('x-read-revision', readRevision(key));
+                recordPhase('read-hash');
                 if (req.headers['if-none-match'] === dbEtag) {
                     res.setHeader('x-read-transfer', 'unchanged');
                     return res.status(304).end();
@@ -4454,6 +4492,7 @@ async function readStorage(req, res, next) {
                 const version = nodeCrypto.createHash('sha256').update(value).digest('hex');
                 res.setHeader('x-storage-etag', version);
                 res.setHeader('x-read-revision', readRevision(key));
+                recordPhase('read-hash');
                 if (req.headers['if-none-match'] === version) {
                     res.setHeader('x-read-transfer', 'unchanged');
                     return res.status(304).end();
@@ -4464,11 +4503,20 @@ async function readStorage(req, res, next) {
             if (deltaRead && value.length >= MIN_DELTA_BYTES && value.length <= MAX_COPY_BYTES) {
                 const hash = bytes => nodeCrypto.createHash('sha256').update(bytes).digest('hex');
                 const packet = Buffer.from(makeDelta(value, req.body, hash));
+                recordPhase('read-delta');
                 // A mostly replaced or highly compressible value can be cheaper
                 // as a full response. Compare wire sizes, not just raw sizes.
                 const gzip = /\bgzip\b/.test(req.headers['accept-encoding'] || '');
-                if (packet.length < value.length * 0.8 &&
-                    (!gzip || zlib.gzipSync(packet).length < zlib.gzipSync(value).length)) {
+                let useDelta = packet.length < value.length * 0.8;
+                if (useDelta && gzip) {
+                    // The full gzip often dwarfs the small delta. Stop as soon
+                    // as that is proven; keep compression off the event loop.
+                    const compared = await compareReadDeltaGzip(packet, value);
+                    useDelta = compared.smaller;
+                    res.setHeader('x-read-compare-bytes', compared.fullInputBytes);
+                }
+                recordPhase('read-compress-compare');
+                if (useDelta) {
                     res.setHeader('x-read-delta', '1');
                     res.setHeader('x-read-transfer', 'delta');
                     return res.send(packet);

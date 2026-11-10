@@ -66,7 +66,7 @@ async function startImport(sessionId: string, feed: (backup: Buffer, controller:
 }
 
 describe('long writes and the session lock', () => {
-  test('a backup import past the cap still holds a booting page back until it lands', async () => {
+  test.each(['legacy', 'bundled'])('a backup import past the cap holds a %s boot back until it lands', async mode => {
     await boot('home')
     expect((await write('home', true)).status).toBe(200)
 
@@ -82,7 +82,11 @@ describe('long writes and the session lock', () => {
 
     await sleep(500)                                     // well past the 200 ms cap
     let booted = false
-    const booting = boot('late').then(() => { booted = true })
+    const booting = (mode === 'legacy' ? boot('late') : client.fetch('/api/test_auth', { headers: {
+      'x-risu-bootstrap': '1', 'x-session-id': 'late',
+    } }).then(async response => {
+      expect(await response.json()).toMatchObject({ bootstrap: { sessionInitialized: true } })
+    })).then(() => { booted = true })
     await sleep(400)
     expect(booted).toBe(false)                           // still waiting for the import
 

@@ -290,6 +290,10 @@ export type AssetManifestOperation =
     | { type: 'replace'; index: number; item: AssetManifestTuple }
 
 export interface StorageReadOptions { deferCacheWrite?: boolean }
+export interface BootstrapInfo {
+    importStatus: RisuAccountImportStatus
+    backupReminderEnabled?: boolean
+}
 
 export class NodeStorage{
     private static readonly BULK_WRITE_CLIENT_BATCH = 20
@@ -318,6 +322,7 @@ export class NodeStorage{
     private static sessionInitialized = false
     private static sessionPending: Promise<void> | null = null
     private refreshPending: Promise<string> | null = null
+    private bootInfo: Partial<BootstrapInfo> | null = null
     private deferredCacheCopies = new Map<string, TransferCopyInput>()
     private cacheWrites: Promise<void> = Promise.resolve()
 
@@ -810,9 +815,9 @@ export class NodeStorage{
     // opened its own password prompt.
     private authPending: Promise<void> | null = null
 
-    private async checkAuth(){
+    private async checkAuth(bootstrap = false){
         if(!this.authChecked){
-            this.authPending ??= this.runAuthCheck().finally(() => {
+            this.authPending ??= this.runAuthCheck(bootstrap).finally(() => {
                 this.authPending = null
             })
             await this.authPending
@@ -821,12 +826,15 @@ export class NodeStorage{
         await this.initSession()
     }
 
-    private async runAuthCheck(){
+    private async runAuthCheck(bootstrap = false){
 
         if(!this.authChecked){
+            this.bootInfo = null
+            const requestBoot = bootstrap && !NodeStorage.sessionInitialized && !NodeStorage.sessionPending
             const data = await authRequest('/api/test_auth',{
                 headers: {
-                    'risu-auth': this.cachedJwt?.token ?? ''
+                    'risu-auth': this.cachedJwt?.token ?? '',
+                    ...(requestBoot ? { 'x-risu-bootstrap': '1', 'x-session-id': NodeStorage.sessionId } : {}),
                 }
             }, (res) => res.json())
 
@@ -859,6 +867,18 @@ export class NodeStorage{
             else{
                 if (data.token) {
                     this.cachedJwt = { token: data.token, expiresAt: Date.now() + 5 * 60 * 1000 }
+                }
+                const boot = data.bootstrap
+                if (requestBoot && data.status === 'success' && typeof data.token === 'string' && data.token &&
+                    boot?.v === 1 && boot.sessionInitialized === true) {
+                    NodeStorage.sessionInitialized = true
+                    const status = boot.importStatus
+                    this.bootInfo = {
+                        importStatus: status && typeof status.blocking === 'boolean' && typeof status.state === 'string'
+                            ? status : undefined,
+                        backupReminderEnabled: typeof boot.backupReminderEnabled === 'boolean'
+                            ? boot.backupReminderEnabled : undefined,
+                    }
                 }
                 this.authChecked = true
             }
@@ -1540,6 +1560,18 @@ export class NodeStorage{
 
     getRisuAccountImportStatus(): Promise<RisuAccountImportStatus> {
         return this.risuAccountRequest('/api/risu-account/status')
+    }
+
+    // Consume a fresh boot-only snapshot once. Normal import polling must
+    // always hit its endpoint, never reuse the authentication-time status.
+    async getBootstrapInfo(): Promise<BootstrapInfo> {
+        await this.checkAuth(true)
+        const boot = this.bootInfo
+        this.bootInfo = null
+        return {
+            importStatus: boot?.importStatus ?? await this.getRisuAccountImportStatus(),
+            backupReminderEnabled: boot?.backupReminderEnabled,
+        }
     }
 
     /** Starts reading the account database; poll the status for the summary. */

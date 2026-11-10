@@ -37,6 +37,9 @@ test('a changed large plugin key uses byte deltas, including the V2 bulk preload
     }, body: new Uint8Array(gzipSync(JSON.stringify(manifest))) })
     expect(res.status).toBe(200)
     expect(res.headers.get('x-read-transfer')).toBe('delta')
+    expect(res.headers.get('server-timing')).toMatch(/read-compress-compare;dur=/)
+    expect(res.headers.get('x-read-compare-bytes')).not.toBeNull()
+    expect(Number(res.headers.get('x-read-compare-bytes'))).toBeLessThan(next.length)
     const packet = Buffer.from(await res.arrayBuffer())
     expect(packet.length).toBeLessThan(next.length * 0.05)
     // Comparing millions of individual bytes with the assertion formatter
@@ -74,6 +77,9 @@ test('main DB changes reconstruct exactly, with the current writer-lock validato
     expect(res.headers.get('x-read-resource')).toBe('database')
     expect(res.headers.get('x-read-transfer')).toBe('delta')
     expect(res.headers.get('x-db-etag')).not.toBe(etag)
+    expect(res.headers.get('server-timing')).toMatch(/read-encode;dur=/)
+    expect(res.headers.get('x-read-compare-bytes')).not.toBeNull()
+    expect(Number(res.headers.get('x-read-compare-bytes'))).toBeLessThan(base.length)
     const packet = Buffer.from(await res.arrayBuffer())
     const full = await client.fetch('/api/read', { headers: { 'file-path': hex(key) } })
     expect(hash(applyDelta(base, packet, hash))).toBe(hash(Buffer.from(await full.arrayBuffer())))
@@ -94,4 +100,33 @@ test('authentication and manifest validation precede reading; unrelated values u
     const res = await client.fetch('/api/read-delta', { method: 'POST', headers: { 'file-path': hex(key), 'content-type': 'application/json' }, body: JSON.stringify(makeManifest(randomBytes(150000), hash)) })
     expect(res.headers.get('x-read-transfer')).toBe('full')
     expect(Buffer.from(await res.arrayBuffer())).toEqual(value)
+})
+
+test('wire-size selection keeps the full response when its gzip beats a raw-smaller delta; identity still uses delta', async () => {
+    const { client } = await boot()
+    const key = 'plugin-storage/' + Buffer.from('compressible').toString('base64url')
+    const next = Buffer.concat(Array.from({ length: 8 }, (_, i) => Buffer.alloc(32768, 65 + i)))
+    const base = Buffer.concat([Buffer.alloc(5 * 32768, 90), next.subarray(5 * 32768)])
+    const write = await client.fetch('/api/write', { method: 'POST', headers: {
+        'file-path': hex(key), 'content-type': 'application/octet-stream',
+    }, body: next })
+    expect(write.status).toBe(200); await write.text()
+    const manifest = JSON.stringify(makeManifest(base, hash))
+    for (const encoding of ['gzip', 'identity']) {
+        const res = await client.fetch('/api/read-delta', { method: 'POST', headers: {
+            'file-path': hex(key), 'content-type': 'application/json', 'accept-encoding': encoding,
+        }, body: manifest })
+        expect(res.status).toBe(200)
+        const body = Buffer.from(await res.arrayBuffer())
+        if (encoding === 'gzip') {
+            expect(res.headers.get('x-read-transfer')).toBe('full')
+            expect(Number(res.headers.get('x-read-compare-bytes'))).toBe(next.length)
+            expect(hash(body)).toBe(hash(next))
+        } else {
+            expect(res.headers.get('x-read-transfer')).toBe('delta')
+            expect(res.headers.get('x-read-compare-bytes')).toBeNull()
+            expect(body.length).toBeLessThan(next.length * 0.8)
+            expect(hash(applyDelta(base, body, hash))).toBe(hash(next))
+        }
+    }
 })

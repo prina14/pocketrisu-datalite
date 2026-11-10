@@ -84,6 +84,8 @@ describe('RisuAI account import', () => {
     expect((await post(client, '/api/risu-account/download')).status).toBe(200)
     const downloaded = await waitForDownload(client)
     expect(downloaded).toMatchObject({ state: 'downloaded', blocking: true, missingCount: 1 })
+    const boot = await client.fetch('/api/test_auth', { headers: { 'x-risu-bootstrap': '1', 'x-session-id': 'import-boot' } })
+    expect(await boot.json()).toMatchObject({ bootstrap: { sessionInitialized: true, importStatus: { state: 'downloaded', blocking: true } } })
 
     // Started: nothing writes until the import ends, and open pages reload.
     const refused = await writeSetting(client, 'page-before')

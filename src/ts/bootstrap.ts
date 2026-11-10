@@ -48,8 +48,11 @@ export async function loadData() {
             // app shows only its screen until it ends. When the status cannot
             // be read the boot goes on; the server still refuses every write.
             let importStatusChecked = false
+            let initialBackupReminder: boolean | undefined
             try {
-                const importStatus = await measureStartupPhase('import-status', () => forageStorage.getRisuAccountImportStatus())
+                const boot = await measureStartupPhase('import-status', () => forageStorage.getBootstrapInfo())
+                const importStatus = boot.importStatus
+                initialBackupReminder = boot.backupReminderEnabled
                 importStatusChecked = true
                 if (importStatus.blocking) {
                     accountImportBlocking.set(true)
@@ -63,7 +66,7 @@ export async function loadData() {
             // Independent of the DB bytes: overlap this read with cache/network
             // work, but keep the actual reminder at its existing pre-UI point.
             const readBootReminder = () => measureStartupPhase('backup-reminder-config', () =>
-                readBootBackupReminderEnabled(() => forageStorage.createAuth(), fetchWithTimeout))
+                initialBackupReminder ?? readBootBackupReminderEnabled(() => forageStorage.createAuth(), fetchWithTimeout))
             // A failed status/auth preflight can recover during getItem. In
             // that case retain the old post-DB reminder read instead of
             // treating an early unauthenticated answer as "disabled".

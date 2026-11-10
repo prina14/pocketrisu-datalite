@@ -148,6 +148,7 @@ export class AutoStorage{
     // ── RisuAI account import ─────────────────────────────────────────────────
     async getRisuAccountImportConfig() { await this.Init(); return this.realStorage.getRisuAccountImportConfig() }
     async getRisuAccountImportStatus() { await this.Init(); return this.realStorage.getRisuAccountImportStatus() }
+    async getBootstrapInfo() { await this.Init(); return this.realStorage.getBootstrapInfo() }
     async prepareRisuAccountImport(token: string, id: string) { await this.Init(); return this.realStorage.prepareRisuAccountImport(token, id) }
     async startRisuAccountDownload() { await this.Init(); return this.realStorage.startRisuAccountDownload() }
     async cancelRisuAccountImport() { await this.Init(); return this.realStorage.cancelRisuAccountImport() }
