@@ -5,7 +5,7 @@ export const MIN_DELTA_BYTES = 128 * 1024
 export const MAX_COPY_BYTES = 512 * 1024 * 1024
 export const MAX_CHUNKS = 65536
 const MIN_CHUNK = 2048, MAX_CHUNK = 32768, MASK = 8191
-const gear = Array.from({ length: 256 }, (_, i) => {
+const gear = Int32Array.from({ length: 256 }, (_, i) => {
     let n = (i + 1) >>> 0
     n = Math.imul(n ^ (n >>> 16), 0x45d9f3b)
     return Math.imul(n ^ (n >>> 16), 0x45d9f3b) >>> 0
@@ -13,15 +13,28 @@ const gear = Array.from({ length: 256 }, (_, i) => {
 
 export function chunks(data) {
     const result = []
-    let start = 0, rolling = 0
-    for (let i = 0; i < data.length; i++) {
-        rolling = ((rolling << 1) + gear[data[i]]) >>> 0
-        const size = i + 1 - start
-        if (size >= MIN_CHUNK && ((rolling & MASK) === 0 || size >= MAX_CHUNK)) {
-            result.push([start, size]); start = i + 1; rolling = 0
+    let start = 0
+    while (start < data.length) {
+        const limit = Math.min(start + MAX_CHUNK, data.length)
+        if (limit - start < MIN_CHUNK) {
+            result.push([start, limit - start])
+            break
         }
+        // No boundary can occur before MIN_CHUNK. After 32 left shifts,
+        // earlier bytes contribute zero modulo 2^32, so warming only the
+        // last 31 bytes gives the exact old rolling state at the first test.
+        let i = start + MIN_CHUNK - 32, rolling = 0
+        const first = start + MIN_CHUNK - 1
+        for (; i < first; i++) rolling = ((rolling << 1) + gear[data[i]]) | 0
+        // Signed int32 preserves the low bits used by MASK and keeps the hot
+        // loop and gear lookups in integer arithmetic.
+        for (; i < limit; i++) {
+            rolling = ((rolling << 1) + gear[data[i]]) | 0
+            if ((rolling & MASK) === 0) { i++; break }
+        }
+        result.push([start, i - start])
+        start = i
     }
-    if (start < data.length) result.push([start, data.length - start])
     return result
 }
 

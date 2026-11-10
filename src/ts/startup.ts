@@ -17,6 +17,15 @@ export async function measureStartupPhase<T>(name: string, operation: () => T | 
     try { return await operation() } finally { finish() }
 }
 
+/** Rendering opportunity for the main UI, not proof of physical display or
+ * an all-network-idle event. Include navigation/JS startup in this metric.
+ */
+export function recordStartupUiFrame(): void {
+    try {
+        performance.measure('pocketrisu:startup:navigation-to-ui-frame', { start: 0, end: performance.now() })
+    } catch { /* Optional diagnostics. */ }
+}
+
 /** Start an optional read only after the database read/initial write has finished.
  * The plugin index depends on server-side legacy storage migration at that boundary.
  * loadPlugins still awaits the store's shared init promise (or retries a failure).

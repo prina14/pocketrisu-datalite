@@ -3,6 +3,8 @@ import * as fflate from "fflate";
 import { createBotPresetTemplate, getDatabase, type Database } from "./database.svelte";
 import { forageStorage } from "../globalApi.svelte";
 import { chatToStub } from "./chatStorage";
+import { utf8ByteLength } from './utf8Length';
+export { utf8ByteLength } from './utf8Length';
 
 const packr = new Packr({
     useRecords:false
@@ -857,27 +859,6 @@ export type HashMismatchReport = {
     serverDuplicateCharIds: string[]
     /** Every compared block agrees yet the document hash differs — key set or composition problem. */
     compositionOnly: boolean
-}
-
-/** UTF-8 byte length of a string without encoding it. */
-export function utf8ByteLength(str: string): number {
-    let bytes = str.length
-    for (let i = 0; i < str.length; i++) {
-        const code = str.charCodeAt(i)
-        if (code < 0x80) continue
-        if (code < 0x800) { bytes += 1; continue }
-        if (code >= 0xD800 && code <= 0xDBFF && i + 1 < str.length) {
-            const next = str.charCodeAt(i + 1)
-            if (next >= 0xDC00 && next <= 0xDFFF) {
-                // Surrogate pair: 2 UTF-16 units, 4 UTF-8 bytes.
-                bytes += 2
-                i++
-                continue
-            }
-        }
-        bytes += 2
-    }
-    return bytes
 }
 
 /**

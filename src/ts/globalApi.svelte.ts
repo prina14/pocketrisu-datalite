@@ -7,6 +7,7 @@ import { setDatabase, type Database, defaultSdDataFunc, getDatabase, appVer, nod
 import { checkRisuUpdate } from "./update";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, DBState, LoadingStatusState, selIdState, ReloadGUIPointer, bodyIntercepterStore, claimLoadingOverlay, chatDeselected } from "./stores.svelte";
 import { recordDbTransferSize } from "./transferSize";
+import { measureStartupPhase } from './startup';
 import { newSaveTiming, recordSaveSample, type SaveOutcome, type SaveTiming } from "./storage/saveMetrics";
 import { loadPlugins } from "./plugins/plugins.svelte";
 import { alertClear, alertConfirm, alertConfirmMulti, alertError, alertMd, alertNormalWait, alertSelect, alertTOS, alertWait, waitAlert, notifySuccess, notifyError, notifyInfo } from "./alert";
@@ -792,7 +793,7 @@ export async function saveDb() {
 
     let patcher = new RisuSavePatcher()
     if (supportsPatchSync) {
-        await patcher.init(patchSyncBaseline ?? getDatabase())
+        await measureStartupPhase('save-baseline-init', () => patcher.init(patchSyncBaseline ?? getDatabase()))
         activeSavePatcher = patcher
         patchSyncBaseline = null
     } else {

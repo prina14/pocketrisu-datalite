@@ -1,8 +1,17 @@
 // @vitest-environment node
 import { afterEach, expect, test, vi } from 'vitest'
-import { beginStartupPhase, measureStartupPhase, readBootBackupReminderEnabled, readDatabaseWithIndexPrefetch, scheduleAfterFirstPaint } from './startup'
+import { beginStartupPhase, measureStartupPhase, readBootBackupReminderEnabled, readDatabaseWithIndexPrefetch, recordStartupUiFrame, scheduleAfterFirstPaint } from './startup'
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
+
+test('UI frame diagnostics include navigation time and remain optional', () => {
+    const measure = vi.fn()
+    vi.stubGlobal('performance', { now: () => 1234, measure })
+    recordStartupUiFrame()
+    expect(measure).toHaveBeenCalledExactlyOnceWith('pocketrisu:startup:navigation-to-ui-frame', { start: 0, end: 1234 })
+    vi.stubGlobal('performance', undefined)
+    expect(() => recordStartupUiFrame()).not.toThrow()
+})
 
 test('plugin index prefetch waits for the DB read and fresh-save acknowledgment but does not block DB processing', async () => {
     let read!: () => void, saved!: () => void

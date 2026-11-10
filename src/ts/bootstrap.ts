@@ -33,7 +33,7 @@ import { registerModelDynamic } from "./model/modellist";
 import { initModelJobRecovery } from "./process/request/jobRecovery";
 import { convertStubsToPlaceholders } from "./storage/chatStorage";
 import { isChatStub, purgeUnsupportedGroupChats } from "./storage/database.svelte";
-import { beginStartupPhase, measureStartupPhase, readBootBackupReminderEnabled, readDatabaseWithIndexPrefetch, scheduleAfterFirstPaint } from './startup';
+import { beginStartupPhase, measureStartupPhase, readBootBackupReminderEnabled, readDatabaseWithIndexPrefetch, recordStartupUiFrame, scheduleAfterFirstPaint } from './startup';
 
 /**
  * Loads the application data.
@@ -42,6 +42,7 @@ export async function loadData() {
     const loaded = get(loadedStore)
     if (!loaded) {
         const finishStartup = beginStartupPhase('load-data')
+        let finishPostData = () => {}
         try {
             applyEarlyLanguage()
             // A started RisuAI account import will replace all data, so the
@@ -196,6 +197,7 @@ export async function loadData() {
             loadedStore.set(true)
             finishStartup()
 
+            finishPostData = beginStartupPhase('post-data-init')
             selectedCharID.set(-1)
 
             // Keep PocketRisu's normal clean boot (-1), then restore through
@@ -231,6 +233,7 @@ export async function loadData() {
                 cleanChunks().catch(console.error)
             }, 5_000)
             scheduleAfterFirstPaint([
+                recordStartupUiFrame,
                 () => forageStorage.flushDeferredCacheWrites(),
                 requestStoragePersistence,
                 checkRisuUpdate,
@@ -241,7 +244,9 @@ export async function loadData() {
             // Installs the return triggers (visibility / online) and runs the
             // first pass. Fire-and-forget — never throws, no-op without jobs.
             initModelJobRecovery()
+            finishPostData()
         } catch (error) {
+            finishPostData()
             finishStartup()
             alertError(error)
         }
