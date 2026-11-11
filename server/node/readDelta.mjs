@@ -58,21 +58,29 @@ export function validManifest(manifest) {
 
 // Packet: 4-byte little-endian JSON-header length, JSON header, literal bytes.
 // Ops [0, index] reuse a base chunk; [1, length] consume literal bytes.
-export function makeDelta(data, manifest, hash) {
+export function prepareDelta(data, hash) {
+    return { data, sha256: hash(data), blocks: chunks(data).map(([offset, size]) => [offset, size, hash(data.subarray(offset, offset + size))]) }
+}
+
+export function makeDelta(data, manifest, hash, prepared) {
     const known = new Map(manifest.chunks.map(([size, sha], i) => [`${size}:${sha}`, i]))
     const ops = [], literals = []
     let literalSize = 0
-    for (const [offset, size] of chunks(data)) {
+    // A prepared index belongs to this exact immutable byte array. Never use
+    // one from an older snapshot, even when its length happens to match.
+    const index = prepared?.data === data ? prepared : null
+    const blocks = index?.blocks ?? chunks(data)
+    for (const [offset, size, sha] of blocks) {
         const block = data.subarray(offset, offset + size)
-        const index = known.get(`${size}:${hash(block)}`)
-        if (index !== undefined) ops.push([0, index])
+        const reuse = known.get(`${size}:${sha ?? hash(block)}`)
+        if (reuse !== undefined) ops.push([0, reuse])
         else {
             if (ops.at(-1)?.[0] === 1) ops.at(-1)[1] += size
             else ops.push([1, size])
             literals.push(block); literalSize += size
         }
     }
-    const header = new TextEncoder().encode(JSON.stringify({ v: 1, size: data.length, sha256: hash(data), ops }))
+    const header = new TextEncoder().encode(JSON.stringify({ v: 1, size: data.length, sha256: index?.sha256 ?? hash(data), ops }))
     const packet = new Uint8Array(4 + header.length + literalSize)
     new DataView(packet.buffer).setUint32(0, header.length, true)
     packet.set(header, 4)

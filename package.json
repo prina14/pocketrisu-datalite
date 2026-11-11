@@ -1,7 +1,7 @@
 {
   "name": "pocketrisu",
   "private": true,
-  "version": "1.17.0-datalite.14",
+  "version": "1.17.0-datalite.15",
   "packageManager": "pnpm@10.34.1",
   "engines": {
     "node": ">=22.12.0"

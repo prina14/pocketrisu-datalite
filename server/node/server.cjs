@@ -13,6 +13,8 @@ const nodeCrypto = require('crypto')
 const zlib = require('zlib')
 const { MIN_DELTA_BYTES, MAX_COPY_BYTES, validManifest, makeDelta } = require('./readDelta.mjs');
 const { compareReadDeltaGzip } = require('./read-delta-compression.cjs');
+const { createReadSnapshotCache, gzipBytes } = require('./read-snapshot-cache.cjs');
+const { startupPreview } = require('./startup-preview.cjs');
 const rateLimit = require('express-rate-limit')
 const { WebSocketServer } = require('ws')
 const Vips = require('wasm-vips')
@@ -89,6 +91,30 @@ const databasePatchHashCache = createPatchHashCache(calculateHash);
 // ETag for database.bin
 let dbEtag = null;
 const readViewTokens = new WeakMap();
+const databaseReadSnapshots = createReadSnapshotCache({ maxBytes: process.env.POCKETRISU_READ_SNAPSHOT_BYTES === undefined
+    ? 64 * 1024 * 1024 : Number(process.env.POCKETRISU_READ_SNAPSHOT_BYTES) });
+let databaseReadWarmTimer = null;
+function scheduleDatabaseReadWarm() {
+    if (databaseReadWarmTimer) clearTimeout(databaseReadWarmTimer);
+    databaseReadWarmTimer = setTimeout(() => {
+        databaseReadWarmTimer = null;
+        // Wait for accepted writes, without adding a write or forcing a flush.
+        void storageOperationQueue.then(() => {
+            if (!databaseReadSnapshots.canWarm()) return;
+            const view = dbCache[DB_HEX_KEY];
+            if (!view) return;
+            let snapshot = databaseReadSnapshots.get(view, dbEtag);
+            if (!snapshot) {
+                const bytes = encodeRisuSaveLegacyBuffer(view);
+                dbEtag = computeBufferEtag(bytes);
+                snapshot = databaseReadSnapshots.create(view, bytes, dbEtag);
+            }
+            snapshot.getPrepared();
+            return snapshot.getGzip();
+        }).catch(error => logger.warn('[Read snapshot] Optional warmup failed:', error?.message || error));
+    }, 1000);
+    databaseReadWarmTimer.unref?.();
+}
 function readRevision(key) {
     const persisted = kvGetReadRevision(key);
     if (!persisted || key !== 'database/database.bin') return persisted;
@@ -135,6 +161,7 @@ let storageOperationQueue = Promise.resolve();
 function queueStorageOperation(operation) {
     const operationRun = storageOperationQueue.then(operation, operation);
     storageOperationQueue = operationRun.catch(() => {});
+    void operationRun.then(scheduleDatabaseReadWarm, scheduleDatabaseReadWarm);
     return operationRun;
 }
 
@@ -478,6 +505,7 @@ async function loadDbCacheIfMissing({ createBackup = false } = {}) {
 }
 
 function invalidateDbCache() {
+    databaseReadSnapshots.clear();
     delete dbCache[DB_HEX_KEY];
     fullChatStore = null;
     pendingActivations.clear();
@@ -3994,6 +4022,42 @@ app.get('/api/server-activity', async (req, res) => {
 //     }
 // })
 
+// A bounded, read-only first-screen index. Cookie authentication lets the
+// lightweight entry display names before downloading the application/DB.
+// No writer session is registered and no data is served before import guards.
+app.get('/api/startup-preview', async (req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.vary('Cookie');
+    res.vary('risu-auth');
+    let started = performance.now();
+    const phase = name => {
+        const now = performance.now();
+        res.append('Server-Timing', `${name};dur=${(now - started).toFixed(2)}`);
+        started = now;
+    };
+    try {
+        const cookie = parseSessionCookie(req);
+        const cookieValid = cookie && (sessions.get(cookie) ?? 0) > Date.now();
+        const jwtValid = req.headers['risu-auth'] && await checkAuth(req, res, true);
+        phase('preview-auth');
+        if (!password || (!cookieValid && !jwtValid)) return res.json({ v: 1, ready: false });
+        const before = await risuAccountImport.status();
+        phase('preview-guard');
+        if (before.blocking) return res.json({ v: 1, ready: false });
+        const preview = await queueStorageOperation(async () => {
+            if (!await loadDbCacheIfMissing({ createBackup: true })) return null;
+            return startupPreview(dbCache[DB_HEX_KEY], readRevision('database/database.bin'));
+        });
+        phase('preview-list');
+        // An import may have started while the cold load was queued.
+        if ((await risuAccountImport.status()).blocking || !preview) return res.json({ v: 1, ready: false });
+        return res.json(preview);
+    } catch (error) {
+        logger.warn('[Startup preview] Optional list unavailable:', error?.message || error);
+        return res.json({ v: 1, ready: false });
+    }
+});
+
 app.get('/api/test_auth', async(req, res, next) => {
     // JWTs and the optional boot snapshot must never be served from HTTP cache.
     res.setHeader('Cache-Control', 'private, no-store');
@@ -4444,6 +4508,8 @@ async function readStorage(req, res, next) {
         if (isDb) await flushPendingDb();
         recordPhase('read-flush');
         let value = null;
+        let readSnapshot = null;
+        let readView = null;
         if (isDb) {
             // The cached client view already excludes chat bodies. Reading the
             // full on-disk blob here used to allocate it only to discard it
@@ -4458,7 +4524,10 @@ async function readStorage(req, res, next) {
                     if (!loaded) return res.send();
                 }
                 recordPhase('read-load');
-                value = encodeRisuSaveLegacyBuffer(dbCache[filePath]);
+                readView = dbCache[filePath];
+                readSnapshot = databaseReadSnapshots.get(readView, dbEtag);
+                res.setHeader('x-read-snapshot', readSnapshot ? 'hit' : 'miss');
+                value = readSnapshot?.raw ?? encodeRisuSaveLegacyBuffer(readView);
                 recordPhase('read-encode');
             } catch (e) {
                 logger.error('[Read] Failed to strip chats from database.bin', e);
@@ -4479,7 +4548,8 @@ async function readStorage(req, res, next) {
             // Strip chat payloads and asset manifests from database.bin — the
             // client gets stubs and descriptors only.
             if (isDb) {
-                dbEtag = computeBufferEtag(value);
+                dbEtag = readSnapshot?.etag ?? computeBufferEtag(value);
+                readSnapshot ??= databaseReadSnapshots.create(readView, value, dbEtag);
                 res.setHeader('x-db-etag', dbEtag);
                 res.setHeader('x-read-revision', readRevision(key));
                 recordPhase('read-hash');
@@ -4500,30 +4570,47 @@ async function readStorage(req, res, next) {
             }
             res.setHeader('Content-Type', 'application/octet-stream');
             res.setHeader('x-read-full-bytes', value.length);
+            const gzip = /\bgzip\b/.test(req.headers['accept-encoding'] || '') && !!req.acceptsEncodings('gzip');
+            const sendGzip = bytes => {
+                res.vary('Accept-Encoding');
+                res.setHeader('Content-Encoding', 'gzip');
+                return res.send(bytes);
+            };
             if (deltaRead && value.length >= MIN_DELTA_BYTES && value.length <= MAX_COPY_BYTES) {
                 const hash = bytes => nodeCrypto.createHash('sha256').update(bytes).digest('hex');
-                const bytes = makeDelta(value, req.body, hash);
+                const bytes = makeDelta(value, req.body, hash, readSnapshot?.getPrepared());
                 // makeDelta owns its output; this view stays valid during
                 // async compression without another full-size byte copy.
                 const packet = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
                 recordPhase('read-delta');
                 // A mostly replaced or highly compressible value can be cheaper
                 // as a full response. Compare wire sizes, not just raw sizes.
-                const gzip = /\bgzip\b/.test(req.headers['accept-encoding'] || '');
                 let useDelta = packet.length < value.length * 0.8;
+                let compressedDelta = null;
                 if (useDelta && gzip) {
                     // The full gzip often dwarfs the small delta. Stop as soon
                     // as that is proven; keep compression off the event loop.
-                    const compared = await compareReadDeltaGzip(packet, value);
-                    useDelta = compared.smaller;
-                    res.setHeader('x-read-compare-bytes', compared.fullInputBytes);
+                    if (readSnapshot?.compressed) {
+                        compressedDelta = await gzipBytes(packet);
+                        useDelta = compressedDelta.length < readSnapshot.compressed.length;
+                        res.setHeader('x-read-compare-bytes', 0);
+                    } else {
+                        const compared = await compareReadDeltaGzip(packet, value);
+                        useDelta = compared.smaller;
+                        res.setHeader('x-read-compare-bytes', compared.fullInputBytes);
+                    }
                 }
                 recordPhase('read-compress-compare');
                 if (useDelta) {
                     res.setHeader('x-read-delta', '1');
                     res.setHeader('x-read-transfer', 'delta');
-                    return res.send(packet);
+                    return compressedDelta ? sendGzip(compressedDelta) : res.send(packet);
                 }
+            }
+            if (readSnapshot && gzip) {
+                const compressed = await readSnapshot.getGzip();
+                recordPhase('read-compress');
+                return sendGzip(compressed);
             }
             res.send(value);
         }

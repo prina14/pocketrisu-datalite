@@ -236,7 +236,7 @@
     {:else if $accountImportBlocking}
         <RisuAccountImportScreen />
     {:else if !$loadedStore && $startupPreview}
-        <StartupPreview names={$startupPreview.names} total={$startupPreview.total} heading={language.character} loadingLabel={language.loading} />
+        <StartupPreview names={$startupPreview.names} total={$startupPreview.total} early={$startupPreview.early ?? false} heading={language.character} loadingLabel={language.loading} />
     {:else if !$loadedStore}
         <StartupShell heading={language.character} status={LoadingStatusState.text || language.loading} />
     {:else if $settingsOpen}

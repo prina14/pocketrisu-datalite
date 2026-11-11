@@ -10,8 +10,12 @@ import { initHotkey } from "./ts/hotkey";
 import { initScrollbarAutoHide } from "./ts/gui/scrollbarAutoHide";
 import { preLoadCheck } from "./preload";
 import { mount, flushSync } from "svelte";
+import { peekStartupPreview } from './ts/earlyStartupPreview';
+import { startupPreview } from './ts/stores.svelte';
 
 preLoadCheck()
+const earlyPreview = peekStartupPreview()
+if (earlyPreview) startupPreview.set({ names: earlyPreview.names, total: earlyPreview.total, early: true })
 let app = mount(App, {
     target: document.getElementById("app"),
 });

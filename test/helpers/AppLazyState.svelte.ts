@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store'
-export const startupPreview = writable<{ names: string[]; total: number } | null>(null)
+export const startupPreview = writable<{ names: string[]; total: number; early?: boolean } | null>(null)
 
 export const DynamicGUI = writable(false)
 export const settingsOpen = writable(false)

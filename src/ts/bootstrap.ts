@@ -1,6 +1,7 @@
 import { migrateLegacyTrash } from "./characterArchive";
 import { startupPreview } from './stores.svelte';
 import { createStartupPreview, waitForStartupPreviewFrame, prefetchStartupPluginValues } from './startup';
+import { getStartupPreviewAfterAuth, peekStartupPreview } from './earlyStartupPreview';
 import { changeFullscreen, checkNullish } from "./util"
 import { v4 as uuidv4 } from 'uuid';
 import { get } from "svelte/store";
@@ -45,6 +46,7 @@ export async function loadData() {
     if (!loaded) {
         const finishStartup = beginStartupPhase('load-data')
         let finishPostData = () => {}
+        let previewAllowed = true
         try {
             applyEarlyLanguage()
             // A started RisuAI account import will replace all data, so the
@@ -75,6 +77,19 @@ export async function loadData() {
             // treating an early unauthenticated answer as "disabled".
             let bootReminderEnabled = importStatusChecked ? readBootReminder() : undefined
 
+            let databaseApplied = false
+            if (importStatusChecked && !peekStartupPreview()) {
+                // First login has no cookie for the lightweight entry. Start a
+                // guarded list request now, in parallel with the full DB read.
+                // Never apply this partial index to DBState or save tracking.
+                void measureStartupPhase('startup-preview-read', () => getStartupPreviewAfterAuth(async (url, init) => {
+                    const auth = await forageStorage.createAuth()
+                    return fetch(url, { ...init, headers: { 'risu-auth': auth } })
+                })).then(preview => {
+                    if (preview && previewAllowed && !databaseApplied) startupPreview.set({ names: preview.names, total: preview.total, early: true })
+                }).catch(() => {})
+            }
+
             let createdFreshDatabase = false
             {
                 LoadingStatusState.text = "Loading Local Save File..."
@@ -95,6 +110,7 @@ export async function loadData() {
                         setPatchSyncBaseline(decoded)
                         setDatabase(decoded)
                     })
+                    databaseApplied = true
                     // /api/read serves the chat-stripped blob — the same shape a
                     // full write sends — so its length is a first estimate of the
                     // transfer size until the first save measures the real payload.
@@ -110,6 +126,7 @@ export async function loadData() {
                             const backupDecoded = await decodeRisuSave(backupData)
                             setPatchSyncBaseline(backupDecoded)
                             setDatabase(backupDecoded)
+                            databaseApplied = true
                             backupLoaded = true
                             break
                         } catch (error) { }
@@ -208,6 +225,7 @@ export async function loadData() {
             } catch (err) {
                 console.warn('[bootstrap] boot backup reminder failed:', err)
             }
+            previewAllowed = false
             loadedStore.set(true)
             startupPreview.set(null)
             finishStartup()
@@ -261,6 +279,7 @@ export async function loadData() {
             initModelJobRecovery()
             finishPostData()
         } catch (error) {
+            previewAllowed = false
             startupPreview.set(null)
             finishPostData()
             finishStartup()

@@ -32,7 +32,7 @@ export const SizeStore = writable({
 })
 
 export const loadedStore = writable(false)
-export const startupPreview = writable<{ names: string[]; total: number } | null>(null)
+export const startupPreview = writable<{ names: string[]; total: number; early?: boolean } | null>(null)
 // A started RisuAI account import: the app shows only its screen (boot stops before the DB load).
 export const accountImportBlocking = writable(false)
 export const isTouchDevice = writable(typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches)

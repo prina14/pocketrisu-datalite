@@ -1,8 +1,12 @@
 <script lang="ts">
+    import { onMount } from 'svelte';
+    import { recordStartupListFrame } from '../../ts/earlyStartupPreview';
     export let names: string[] = [];
     export let total = 0;
     export let heading = '캐릭터';
     export let loadingLabel = '준비 중…';
+    export let early = false;
+    onMount(() => { if (early) recordStartupListFrame() });
 </script>
 
 <section class="startup-preview bg-bgcolor text-textcolor" aria-busy="true" aria-label={loadingLabel}>
