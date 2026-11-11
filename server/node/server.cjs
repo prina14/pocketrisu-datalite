@@ -13,7 +13,7 @@ const nodeCrypto = require('crypto')
 const zlib = require('zlib')
 const { MIN_DELTA_BYTES, MAX_COPY_BYTES, validManifest, makeDelta } = require('./readDelta.mjs');
 const { compareReadDeltaGzip } = require('./read-delta-compression.cjs');
-const { createReadSnapshotCache, gzipBytes } = require('./read-snapshot-cache.cjs');
+const { createReadSnapshotCache, gzipBytes, brotliBytes, preferredReadEncoding } = require('./read-snapshot-cache.cjs');
 const { startupPreview } = require('./startup-preview.cjs');
 const rateLimit = require('express-rate-limit')
 const { WebSocketServer } = require('ws')
@@ -110,7 +110,7 @@ function scheduleDatabaseReadWarm() {
                 snapshot = databaseReadSnapshots.create(view, bytes, dbEtag);
             }
             snapshot.getPrepared();
-            return snapshot.getGzip();
+            return Promise.all([snapshot.getGzip(), snapshot.getBrotli()]);
         }).catch(error => logger.warn('[Read snapshot] Optional warmup failed:', error?.message || error));
     }, 1000);
     databaseReadWarmTimer.unref?.();
@@ -4570,10 +4570,12 @@ async function readStorage(req, res, next) {
             }
             res.setHeader('Content-Type', 'application/octet-stream');
             res.setHeader('x-read-full-bytes', value.length);
-            const gzip = /\bgzip\b/.test(req.headers['accept-encoding'] || '') && !!req.acceptsEncodings('gzip');
-            const sendGzip = bytes => {
+            const encoding = preferredReadEncoding(req);
+            const gzip = encoding === 'gzip';
+            let compressedFull = null;
+            const sendCompressed = bytes => {
                 res.vary('Accept-Encoding');
-                res.setHeader('Content-Encoding', 'gzip');
+                res.setHeader('Content-Encoding', encoding);
                 return res.send(bytes);
             };
             if (deltaRead && value.length >= MIN_DELTA_BYTES && value.length <= MAX_COPY_BYTES) {
@@ -4587,6 +4589,13 @@ async function readStorage(req, res, next) {
                 // as a full response. Compare wire sizes, not just raw sizes.
                 let useDelta = packet.length < value.length * 0.8;
                 let compressedDelta = null;
+                if (useDelta && encoding === 'br') {
+                    const reused = !!readSnapshot?.brotli;
+                    compressedDelta = await brotliBytes(packet);
+                    compressedFull = readSnapshot ? await readSnapshot.getBrotli() : await brotliBytes(value);
+                    useDelta = compressedDelta.length < compressedFull.length;
+                    res.setHeader('x-read-compare-bytes', reused ? 0 : value.length);
+                }
                 if (useDelta && gzip) {
                     // The full gzip often dwarfs the small delta. Stop as soon
                     // as that is proven; keep compression off the event loop.
@@ -4604,14 +4613,15 @@ async function readStorage(req, res, next) {
                 if (useDelta) {
                     res.setHeader('x-read-delta', '1');
                     res.setHeader('x-read-transfer', 'delta');
-                    return compressedDelta ? sendGzip(compressedDelta) : res.send(packet);
+                    return compressedDelta ? sendCompressed(compressedDelta) : res.send(packet);
                 }
             }
-            if (readSnapshot && gzip) {
-                const compressed = await readSnapshot.getGzip();
+            if (readSnapshot && (gzip || encoding === 'br')) {
+                const compressed = compressedFull ?? await (gzip ? readSnapshot.getGzip() : readSnapshot.getBrotli());
                 recordPhase('read-compress');
-                return sendGzip(compressed);
+                return sendCompressed(compressed);
             }
+            if (compressedFull) return sendCompressed(compressedFull);
             res.send(value);
         }
     } catch (error) {

@@ -1,9 +1,30 @@
 import { expect, test, vi } from 'vitest'
 import { createHash, randomBytes } from 'node:crypto'
-import { gunzipSync } from 'node:zlib'
+import { gunzipSync, brotliDecompressSync, createBrotliCompress, constants } from 'node:zlib'
 import { makeManifest, makeDelta, applyDelta, prepareDelta } from './readDelta.mjs'
-const { createReadSnapshotCache } = require('./read-snapshot-cache.cjs')
+const { createReadSnapshotCache, preferredReadEncoding, brotliBytes } = require('./read-snapshot-cache.cjs')
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex')
+
+test('encoding selection preserves the compression middleware preference and client quality/opt-out', () => {
+    for (const [header, expected] of [
+        ['gzip, deflate, br', 'br'], ['gzip;q=1,br;q=1', 'br'], ['br;q=0,gzip', 'gzip'],
+        ['br;q=0.1,gzip;q=1', 'gzip'], ['gzip;q=0,identity', 'identity'], ['deflate', 'deflate'],
+    ]) expect(preferredReadEncoding({ headers: { 'accept-encoding': header } })).toBe(expected)
+    expect(preferredReadEncoding({ headers: {} })).toBe('identity')
+})
+
+test('prepared Brotli bytes match the existing middleware quality-4 stream', async () => {
+    const bytes = Buffer.concat([randomBytes(200_000), Buffer.alloc(500_000, 65)])
+    const stream = createBrotliCompress({ params: { [constants.BROTLI_PARAM_QUALITY]: 4 } })
+    const streamed = new Promise<Buffer>((resolve, reject) => {
+        const chunks: Buffer[] = []
+        stream.on('data', part => chunks.push(part))
+        stream.on('error', reject)
+        stream.on('end', () => resolve(Buffer.concat(chunks)))
+    })
+    stream.end(bytes)
+    expect(hash(await brotliBytes(bytes))).toBe(hash(await streamed))
+})
 
 test('one version shares immutable bytes, compression and prepared hashes; changed views/validators never hit', async () => {
     const cache = createReadSnapshotCache()
@@ -16,6 +37,9 @@ test('one version shares immutable bytes, compression and prepared hashes; chang
     const a = entry.getGzip(), b = entry.getGzip()
     expect(a).toBe(b)
     expect(gunzipSync(await a)).toEqual(bytes)
+    const br = entry.getBrotli()
+    expect(br).toBe(entry.getBrotli())
+    expect(brotliDecompressSync(await br)).toEqual(bytes)
     expect(entry.getPrepared()).toBe(entry.getPrepared())
     const replacement = cache.create({}, Buffer.from('new'), 'v2')
     await replacement.getGzip()

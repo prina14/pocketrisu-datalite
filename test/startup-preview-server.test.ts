@@ -107,11 +107,18 @@ test('cached gzip, identity and prepared deltas keep identical bytes and integri
     const identity = await read('gzip;q=0, identity')
     expect(identity.headers.get('content-encoding')).toBeNull()
     expect(hash(Buffer.from(await identity.arrayBuffer()))).toBe(hash(base))
+    for (const [accept, selected] of [['gzip, deflate, br', 'br'], ['br;q=0,gzip', 'gzip'], ['br;q=0.1,gzip;q=1', 'gzip']]) {
+        const negotiated = await read(accept)
+        expect(negotiated.headers.get('content-encoding')).toBe(selected)
+        expect(hash(Buffer.from(await negotiated.arrayBuffer()))).toBe(hash(base))
+    }
     await write(db('edited'))
-    const current = await read('gzip'), expected = Buffer.from(await current.arrayBuffer())
-    for (let i = 0; i < 2; i++) {
-        const delta = await client.fetch('/api/read-delta', { method: 'POST', headers: { 'file-path': hex(key), 'content-type': 'application/json', 'accept-encoding': 'gzip' }, body: JSON.stringify(makeManifest(base, hash)) })
+    const current = await read('br,gzip'), expected = Buffer.from(await current.arrayBuffer())
+    const primeGzip = await read('gzip'); await primeGzip.arrayBuffer()
+    for (const encoding of ['gzip', 'br']) {
+        const delta = await client.fetch('/api/read-delta', { method: 'POST', headers: { 'file-path': hex(key), 'content-type': 'application/json', 'accept-encoding': encoding }, body: JSON.stringify(makeManifest(base, hash)) })
         expect(delta.headers.get('x-read-delta')).toBe('1')
+        expect(delta.headers.get('content-encoding')).toBe(encoding)
         expect(delta.headers.get('x-read-snapshot')).toBe('hit')
         expect(delta.headers.get('x-read-compare-bytes')).toBe('0')
         expect(hash(applyDelta(base, new Uint8Array(await delta.arrayBuffer()), hash))).toBe(hash(expected))

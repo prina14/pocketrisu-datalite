@@ -148,6 +148,9 @@ importers:
       msgpackr:
         specifier: 1.11.9
         version: 1.11.9
+      negotiator:
+        specifier: 0.6.4
+        version: 0.6.4
       node-html-parser:
         specifier: ^6.1.13
         version: 6.1.13
