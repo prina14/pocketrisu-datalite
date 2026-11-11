@@ -20,6 +20,7 @@ export class AutoStorage{
         return await this.realStorage.getItem(key, options)
     }
     flushDeferredCacheWrites() { return this.realStorage?.flushDeferredCacheWrites() ?? Promise.resolve() }
+    scheduleDbCacheRefresh() { this.realStorage?.scheduleDbCacheRefresh() }
     async keys(prefix: string = ''):Promise<string[]>{
         await this.Init()
         return await this.realStorage.keys(prefix)

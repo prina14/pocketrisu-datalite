@@ -1,4 +1,5 @@
 import { derived, get, writable, type Readable } from "svelte/store"
+import { registerUnsavedWork } from '../storage/unsavedWork'
 
 // Per-chat generation state, keyed by the REAL chat id (chat.id) — not the
 // per-request generationId that flows through request args as `chatId` (see
@@ -26,6 +27,7 @@ export interface GenState {
 }
 
 export const generationStates = writable<Map<string, GenState>>(new Map())
+registerUnsavedWork(() => get(generationStates).size > 0)
 
 // Compat stores. Kept writable: Suggestion.svelte pulses doingChat true→false
 // to retrigger its subscriber (only while nothing is generating, so the pulse

@@ -8,6 +8,8 @@ export interface TransferValidators { versions: [string, string][]; revisions: [
 export interface TransferCache {
     get(key: string, onVersion?: (version: TransferVersion) => void): Promise<TransferCopy | null>
     put(key: string, etag: string, data: Uint8Array, revision?: string): Promise<void>
+    /** DB callers handle failure/retry explicitly; ordinary optional puts stay non-fatal. */
+    putChecked?(key: string, etag: string, data: Uint8Array, revision?: string): Promise<void>
     putBatch?(copies: TransferCopyInput[]): Promise<void>
     updateRevision(key: string, etag: string, revision: string): Promise<void>
     versions(prefix: string, revisionsOnly?: boolean): Promise<[string, string][]>
@@ -196,6 +198,10 @@ export const transferCache: TransferCache = {
     },
     async put(key, etag, data, revision) {
         await putCopies([{ key, etag, data, revision }])
+    },
+    async putChecked(key, etag, data, revision) {
+        if (data.byteLength > MAX_BYTES) throw Object.assign(new Error('Copy exceeds the cache entry limit'), { name: 'CacheEntryTooLargeError' })
+        await writeBatch([{ key, etag, data, revision }])
     },
     async putBatch(copies) { await putCopies(copies) },
 }

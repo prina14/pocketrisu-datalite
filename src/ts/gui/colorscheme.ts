@@ -5,6 +5,7 @@ import { BufferToText, selectSingleFile } from "../util";
 import { notifyError } from "../alert";
 import { isLite } from "../lite";
 import { CustomCSSStore, SafeModeStore } from "../stores.svelte";
+import { cacheStartupPresentation } from '../startupPresentationCache';
 
 export interface ColorScheme{
     bgcolor: string;
@@ -316,6 +317,7 @@ export function updateColorScheme(){
         // the toggle/CTA fill stays usable until the user picks a custom value.
         document.documentElement.style.setProperty("--risu-theme-primary", colorScheme.primary ?? defaultColorScheme.primary);
         ColorSchemeTypeStore.set(colorScheme.type)
+        cacheStartupPresentation(db)
     } catch (error) {}
 }
 
@@ -453,4 +455,5 @@ export function updateTextThemeAndCSS(){
     else{
         CustomCSSStore.set('')
     }
+    cacheStartupPresentation(db)
 }

@@ -659,3 +659,17 @@ describe('snapshotAll', () => {
         expect(JSON.parse(JSON.stringify(snap))['__proto__']).toEqual({ p: 1 })
     })
 })
+
+test('failed fire-and-forget saves stay protected and an identical retry reaches the server', async () => {
+    vi.useFakeTimers()
+    const { hasUnsavedWork } = await import('../storage/unsavedWork')
+    try {
+        mockState.setItemFails = 3
+        store.setItemSync('retry-protection', 'value')
+        expect(hasUnsavedWork()).toBe(true)
+        await vi.runAllTimersAsync()
+        expect(hasUnsavedWork()).toBe(true)
+        await store.setItem('retry-protection', 'value')
+        expect(hasUnsavedWork()).toBe(false)
+    } finally { vi.useRealTimers() }
+})

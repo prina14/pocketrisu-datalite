@@ -206,7 +206,7 @@ describe('validated boot copies', () => {
         await flushing
         await s.getItem('database/database.bin', { deferCacheWrite: true })
         await s.flushDeferredCacheWrites()
-        expect(transferCache.put).toHaveBeenCalledTimes(2)
+        expect(transferCache.put).toHaveBeenCalledTimes(3)
     })
 
     test('a known revision validates a large copy without uploading chunk hashes', async () => {
@@ -467,4 +467,93 @@ describe('changed large values', () => {
         expect(onEntry).toHaveBeenCalledWith('memory', next.toString())
         expect(fetcher.mock.calls[1][0]).toBe('/api/read-delta')
     })
+})
+
+describe('post-save boot-copy refresh', () => {
+    test('coalesces accepted saves and updates only the copy, preserving the live editor validator', async () => {
+        vi.useFakeTimers()
+        try {
+            copies.set('db:database/database.bin', { etag: 'old', revision: 'r0', data: bytes('old') })
+            const fetcher = vi.fn(async (_url, init) => new Response(null, { status: 304, headers: { 'x-read-version-check': '1', 'x-read-revision': 'r1' } }))
+            const s = storage(fetcher)
+            s._lastDbEtag = 'editor-baseline'
+            const before = performance.getEntriesByName('pocketrisu:startup:database-cache-write').length
+            s.scheduleDbCacheRefresh()
+            await vi.advanceTimersByTimeAsync(1000)
+            s.scheduleDbCacheRefresh()
+            await vi.advanceTimersByTimeAsync(1499)
+            expect(fetcher).not.toHaveBeenCalled()
+            await vi.advanceTimersByTimeAsync(1)
+            await vi.runAllTimersAsync()
+            expect(fetcher).toHaveBeenCalledOnce()
+            expect(new Headers(fetcher.mock.calls[0][1].headers).get('x-read-cache-refresh')).toBe('1')
+            expect(copies.get('db:database/database.bin').revision).toBe('r1')
+            expect(s._lastDbEtag).toBe('editor-baseline')
+            expect(performance.getEntriesByName('pocketrisu:startup:database-cache-write')).toHaveLength(before)
+        } finally { vi.useRealTimers() }
+    })
+
+    test('background data is validated and persisted without adopting a foreign write ETag', async () => {
+        copies.set('db:database/database.bin', { etag: 'old', data: bytes('old') })
+        const s = storage(vi.fn(async () => new Response('latest', { headers: { 'x-db-etag': 'foreign', 'x-read-revision': 'r2' } })))
+        s._lastDbEtag = 'live-baseline'
+        await s.getItem('database/database.bin', { purpose: 'cache-refresh' })
+        expect(copies.get('db:database/database.bin').etag).toBe('foreign')
+        expect(s._lastDbEtag).toBe('live-baseline')
+    })
+
+    test('an older background response cannot replace a later read copy', async () => {
+        let release!: (response: Response) => void
+        const fetcher = vi.fn().mockImplementationOnce(() => new Promise<Response>(resolve => { release = resolve }))
+            .mockResolvedValueOnce(new Response('new', { headers: { 'x-db-etag': 'new' } }))
+        const s = storage(fetcher)
+        const background = s.getItem('database/database.bin', { purpose: 'cache-refresh' })
+        await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce())
+        await s.getItem('database/database.bin')
+        release(new Response('older', { headers: { 'x-db-etag': 'older' } }))
+        await background
+        expect(copies.get('db:database/database.bin').etag).toBe('new')
+        expect(s._lastDbEtag).toBe('new')
+    })
+
+    test('cache failures are recorded and retried once without failing a valid read', async () => {
+        vi.useFakeTimers()
+        try {
+            vi.mocked(transferCache.put).mockRejectedValue(Object.assign(new Error('synthetic quota'), { name: 'QuotaExceededError' }))
+            const s = storage(vi.fn(async () => new Response('valid', { headers: { 'x-db-etag': 'valid' } })))
+            const result = s.getItem('database/database.bin', { purpose: 'cache-refresh' })
+            await vi.runAllTimersAsync()
+            expect((await result).toString()).toBe('valid')
+            expect(transferCache.put).toHaveBeenCalledTimes(2)
+            expect(globalThis.__pocketrisuSyncDiagnostics!().filter(row => row.type === 'cache-write-failed').slice(-2).map(row => row.error)).toEqual(['QuotaExceededError', 'QuotaExceededError'])
+        } finally { vi.useRealTimers() }
+    })
+})
+
+test('a save during an in-flight copy refresh schedules a follow-up without stranding it', async () => {
+    vi.useFakeTimers()
+    try {
+        let release!: (response: Response) => void
+        const fetcher = vi.fn().mockImplementationOnce(() => new Promise<Response>(resolve => { release = resolve }))
+            .mockResolvedValueOnce(new Response('latest', { headers: { 'x-db-etag': 'latest' } }))
+        const s = storage(fetcher)
+        const first = (s as any).refreshDbCache() as Promise<void>
+        await vi.advanceTimersByTimeAsync(0)
+        s.scheduleDbCacheRefresh()
+        await vi.advanceTimersByTimeAsync(1500)
+        release(new Response('first', { headers: { 'x-db-etag': 'first' } }))
+        await first
+        await vi.advanceTimersByTimeAsync(1500)
+        await vi.runAllTimersAsync()
+        expect(fetcher).toHaveBeenCalledTimes(2)
+        expect(copies.get('db:database/database.bin').etag).toBe('latest')
+    } finally { vi.useRealTimers() }
+})
+
+test('patch diagnostics name root fields without recording the changed content', async () => {
+    const s = storage(vi.fn(async () => Response.json({ success: true, etag: 'accepted' })))
+    await s.patchItem('database/database.bin', { patch: [{ op: 'replace', path: '/globalNote', value: 'private-content-sentinel' }], expectedHash: 'baseline' })
+    const trace = globalThis.__pocketrisuSyncDiagnostics!()
+    expect(trace.at(-1)?.roots).toEqual(['globalNote'])
+    expect(JSON.stringify(trace)).not.toContain('private-content-sentinel')
 })

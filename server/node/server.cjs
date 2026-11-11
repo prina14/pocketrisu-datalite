@@ -4589,7 +4589,11 @@ async function readStorage(req, res, next) {
         if (isDb) {
             foregroundDatabaseReads++;
             activeDatabaseRead = true;
-            await flushPendingDb();
+            // A best-effort browser copy can use acknowledged in-memory data.
+            // Normal reads still flush, and every later boot revalidates it.
+            const cacheRefresh = req.headers['x-read-cache-refresh'] === '1';
+            if (!cacheRefresh) await flushPendingDb();
+            else res.setHeader('x-read-persist-policy', 'memory-view');
         }
         recordPhase('read-flush');
         let value = null;
@@ -5574,7 +5578,9 @@ app.post('/api/patch', async (req, res, next) => {
             // Update ETag after successful patch (based on stripped version)
             patchStage = 'etag';
             if (decodedKey === 'database/database.bin') {
-                dbEtag = computeBufferEtag(Buffer.from(encodeRisuSaveLegacy(dbCache[filePath])));
+                const encodedView = encodeRisuSaveLegacyBuffer(dbCache[filePath]);
+                dbEtag = computeBufferEtag(encodedView);
+                databaseReadSnapshots.create(dbCache[filePath], encodedView, dbEtag);
             }
             timings.etagMs = lap();
             timings.totalMs = Math.round(performance.now() - patchStartedAt);

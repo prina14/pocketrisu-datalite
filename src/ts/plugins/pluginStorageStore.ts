@@ -25,6 +25,7 @@
 import { forageStorage } from "../globalApi.svelte";
 import { alertError } from "../alert";
 import { encodeStorageKeyComponent } from "../storage/persistentKv";
+import { registerUnsavedWork } from '../storage/unsavedWork';
 
 const KV_PREFIX = "plugin-storage/";
 const DEFAULT_CACHE_CAP = 64 * 1024 * 1024;
@@ -65,6 +66,7 @@ let knownHashes = new Map<string, string>();
 function serverHasValue(key: string, hash: string): boolean {
     const pending = pendingOp(key);
     if (pending) return pending.op === "set" && pending.hash === hash;
+    if (failedSyncWrites.has(key)) return false;
     return !tombstones.has(key) && knownHashes.get(key) === hash;
 }
 
@@ -110,6 +112,8 @@ interface Intent {
 let queues = new Map<string, Intent[]>();
 let inflight = new Map<string, PendingOp>();
 let workers = new Set<string>();
+let failedSyncWrites = new Set<string>();
+registerUnsavedWork(() => workers.size > 0 || queues.size > 0 || inflight.size > 0 || failedSyncWrites.size > 0);
 
 // The op that will be on the server once the key's pending writes drain.
 function pendingOp(key: string): PendingOp | undefined {
@@ -313,6 +317,7 @@ async function worker(key: string) {
             inflight.set(key, intent.op);
             try {
                 await performOp(key, intent.op);
+                failedSyncWrites.delete(key);
                 inflight.delete(key);
                 for (const b of batch) b.resolve(b !== intent);
                 break;
@@ -322,6 +327,7 @@ async function worker(key: string) {
                     const name = intent.op.op === "set" ? "write" : "remove";
                     console.error(`[pluginStorage] ${name} "${key}" failed after ${attempt} attempts`, e);
                     if (batch.some((b) => b.sync)) {
+                        failedSyncWrites.add(key);
                         alertError(`Plugin storage ${name} failed for "${key}": ${e instanceof Error ? e.message : String(e)}`);
                     }
                     for (const b of batch) b.reject(e);
@@ -582,4 +588,5 @@ export function _resetForTests() {
     queues = new Map();
     inflight = new Map();
     workers = new Set();
+    failedSyncWrites = new Set();
 }

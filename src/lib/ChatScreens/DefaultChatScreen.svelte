@@ -8,7 +8,8 @@
     import ShDropdownMenuContent from 'src/lib/UI/GUI/ShDropdownMenuContent.svelte';
     import ShDropdownMenuItem from 'src/lib/UI/GUI/ShDropdownMenuItem.svelte';
     import { selectedCharID, PlaygroundStore, createSimpleCharacter, hypaV3ModalOpen, ScrollToMessageStore, additionalChatMenu, additionalFloatingActionButtons, chatDeselected, chatPanelStore, alertStore, holdChatEditorOverlay } from "../../ts/stores.svelte";
-    import { tick, untrack } from 'svelte';
+    import { tick, untrack, onDestroy } from 'svelte';
+    import { registerUnsavedWork } from 'src/ts/storage/unsavedWork';
     import Chat from "./Chat.svelte";
     import { getAdditionalChatLoadPages, getInitialChatLoadPages } from 'src/ts/chatLoadPages';
     import { type Chat as ChatData, type Message, loadTogglesFromChat } from "../../ts/storage/database.svelte";
@@ -80,6 +81,8 @@ import { isMobile } from 'src/ts/platform'
     let chatsInstance: any = $state()
     let isScrollingToMessage = $state(false)
     let { openModuleList = $bindable(false), openChatList = $bindable(false), customStyle = '' }: Props = $props();
+    onDestroy(registerUnsavedWork(() => $selectedCharID >= 0 &&
+        (messageInput.length > 0 || messageInputTranslate.length > 0 || fileInput.length > 0)));
     let currentCharacter = $derived(DBState.db.characters[$selectedCharID])
     let currentChatSlot = $derived(currentCharacter?.chats[currentCharacter.chatPage])
     let currentChatReady = $derived(!!currentChatSlot && !currentChatSlot._placeholder)

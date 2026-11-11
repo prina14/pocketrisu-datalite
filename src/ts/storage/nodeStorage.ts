@@ -12,6 +12,7 @@ import { normalizeChat } from "./database.svelte"
 import type { PatchServerTimings } from "./saveMetrics"
 import { transferCache, type TransferCopyInput, type TransferVersion } from './transferCache'
 import { beginStartupPhase, measureStartupPhase } from '../startup'
+import { recordSyncDiagnostic } from './syncDiagnostics'
 import { readHashAsync } from './readDeltaHash'
 import { gzipSync } from 'fflate'
 import { MIN_DELTA_BYTES, makeManifestAsync, applyDeltaAsync } from '../../../server/node/readDelta.mjs'
@@ -142,6 +143,7 @@ export interface PersistWarning {
 
 export interface PatchItemResult {
     success: boolean
+    unchanged?: boolean
     etag?: string
     persistWarning?: PersistWarning
     /** Set when the server's chat-internal-field guard rejected the patch. */
@@ -285,7 +287,7 @@ export type AssetManifestOperation =
     | { type: 'rename'; index: number; name: string }
     | { type: 'replace'; index: number; item: AssetManifestTuple }
 
-export interface StorageReadOptions { deferCacheWrite?: boolean }
+export interface StorageReadOptions { deferCacheWrite?: boolean; purpose?: 'cache-refresh' }
 export interface BootstrapInfo {
     importStatus: RisuAccountImportStatus
     backupReminderEnabled?: boolean
@@ -321,11 +323,53 @@ export class NodeStorage{
     private bootInfo: Partial<BootstrapInfo> | null = null
     private deferredCacheCopies = new Map<string, TransferCopyInput>()
     private cacheWrites: Promise<void> = Promise.resolve()
+    private dbCopyRefreshTimer: ReturnType<typeof setTimeout> | undefined
+    private dbCopyRefreshPending: Promise<void> | null = null
+    private dbCopyRefreshDirty = false
+    private dbCopyReadGeneration = 0
 
-    private persistDbCopy(copy: TransferCopyInput): Promise<void> {
-        this.cacheWrites = this.cacheWrites.then(() => measureStartupPhase('database-cache-write', () =>
-            transferCache.put(copy.key, copy.etag, copy.data, copy.revision))).catch(() => {})
+    private persistDbCopy(copy: TransferCopyInput, startup = true): Promise<void> {
+        const write = async () => {
+            for (let attempt = 1; attempt <= 2; attempt++) {
+                try {
+                    const put = transferCache.putChecked ?? transferCache.put
+                    await put.call(transferCache, copy.key, copy.etag, copy.data, copy.revision)
+                    recordSyncDiagnostic('cache-write-ok', { etag: copy.etag, bytes: copy.data.byteLength, attempt })
+                    return
+                } catch (error) {
+                    recordSyncDiagnostic('cache-write-failed', { attempt, error: error instanceof Error ? error.name : 'CacheError' })
+                    if (attempt === 1) await new Promise(resolve => setTimeout(resolve, 100))
+                }
+            }
+        }
+        this.cacheWrites = this.cacheWrites.then(() => startup ? measureStartupPhase('database-cache-write', write) : write()).catch(() => {})
         return this.cacheWrites
+    }
+
+    /** Refresh only the optional boot copy, without rebasing the live editor or
+     * adopting another device's write validator. Coalesce streaming/boot saves. */
+    scheduleDbCacheRefresh(): void {
+        this.dbCopyRefreshDirty = true
+        clearTimeout(this.dbCopyRefreshTimer)
+        this.dbCopyRefreshTimer = setTimeout(() => {
+            this.dbCopyRefreshTimer = undefined
+            void this.refreshDbCache()
+        }, 1500)
+        ;(this.dbCopyRefreshTimer as unknown as { unref?: () => void }).unref?.()
+    }
+
+    private refreshDbCache(): Promise<void> {
+        if (this.dbCopyRefreshPending) return this.dbCopyRefreshPending
+        this.dbCopyRefreshDirty = false
+        recordSyncDiagnostic('cache-refresh-start')
+        this.dbCopyRefreshPending = this.getItem('database/database.bin', { purpose: 'cache-refresh' })
+            .then(() => { recordSyncDiagnostic('cache-refresh-read-complete') })
+            .catch(error => { recordSyncDiagnostic('cache-refresh-read-failed', { error: error instanceof Error ? error.name : 'ReadError' }) })
+            .finally(() => {
+                this.dbCopyRefreshPending = null
+                if (this.dbCopyRefreshDirty && !this.dbCopyRefreshTimer) this.scheduleDbCacheRefresh()
+            })
+        return this.dbCopyRefreshPending
     }
 
     flushDeferredCacheWrites(): Promise<void> {
@@ -650,6 +694,7 @@ export class NodeStorage{
         }
         if (key === 'database/database.bin') {
             this._lastDbWriteDiagnostics = parseHashDiagnostics(data)
+            recordSyncDiagnostic('full-write-accepted', { etag: this._lastDbEtag })
         }
     }
 
@@ -664,8 +709,11 @@ export class NodeStorage{
             'file-path': Buffer.from(key, 'utf-8').toString('hex')
         }
         const isDatabase = key === 'database/database.bin'
+        const background = options.purpose === 'cache-refresh'
+        const generation = isDatabase ? ++this.dbCopyReadGeneration : 0
+        if (isDatabase && background) headers['x-read-cache-refresh'] = '1'
         const measured = async <T>(phase: string, operation: () => T | Promise<T>): Promise<T> =>
-            isDatabase ? measureStartupPhase(`database-${phase}`, operation) : operation()
+            isDatabase && !background ? measureStartupPhase(`database-${phase}`, operation) : operation()
         const readRequest = (url: string, init: RequestInit) => measured('server-read', () => this.authFetch(url, init))
         const copyKey = isDatabase ? 'db:' + key : key.startsWith('plugin-storage/')
             ? 'plugin:' + Buffer.from(key.slice('plugin-storage/'.length).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')
@@ -696,8 +744,10 @@ export class NodeStorage{
         }
         if (!da && copy?.revision) {
             probed ??= await probe(copy)
+            if (isDatabase) recordSyncDiagnostic('read-probe', { background, status: probed.status,
+                localRevision: copy.revision, serverRevision: probed.headers.get('x-read-revision'), etag: copy.etag })
             if (probed.status === 304) {
-                if (isDatabase) this._lastDbEtag = copy.etag
+                if (isDatabase && !background) this._lastDbEtag = copy.etag
                 const next = probed.headers.get('x-read-revision')
                 if (next && next !== copy.revision) await transferCache.updateRevision?.(copyKey!, copy.etag, next)
                 return Buffer.from(copy.data)
@@ -724,7 +774,7 @@ export class NodeStorage{
             da = await readRequest('/api/read', { method: 'GET', headers, cache: 'no-store' })
         }
         if (da.status === 304 && copy) {
-            if (isDatabase) this._lastDbEtag = copy.etag
+            if (isDatabase && !background) this._lastDbEtag = copy.etag
             const revision = da.headers.get('x-read-revision')
             if (revision) await transferCache.updateRevision?.(copyKey!, copy.etag, revision)
             return Buffer.from(copy.data)
@@ -752,7 +802,7 @@ export class NodeStorage{
         // Capture the validator of the fully reconstructed value, never that
         // of a failed delta or of the older local base.
         const etag = da.headers.get('x-db-etag')
-        if (etag) {
+        if (etag && !background) {
             this._lastDbEtag = etag
         }
 
@@ -763,9 +813,11 @@ export class NodeStorage{
         if (copyKey && copyEtag) {
             const snapshot = { key: copyKey, etag: copyEtag, data: new Uint8Array(data), revision: da.headers.get('x-read-revision') ?? undefined }
             if (isDatabase) {
-                this.deferredCacheCopies.delete(copyKey)
-                if (options.deferCacheWrite) this.deferredCacheCopies.set(copyKey, snapshot)
-                else await this.persistDbCopy(snapshot)
+                if (generation === this.dbCopyReadGeneration) {
+                    this.deferredCacheCopies.delete(copyKey)
+                    if (options.deferCacheWrite) this.deferredCacheCopies.set(copyKey, snapshot)
+                    else await this.persistDbCopy(snapshot, !background)
+                }
             } else await transferCache.put(copyKey, copyEtag, snapshot.data, snapshot.revision)
         }
 
@@ -985,7 +1037,12 @@ export class NodeStorage{
         const serverTimings = data.timings && typeof data.timings === 'object'
             ? data.timings as PatchServerTimings
             : undefined
-        return { success: true, etag: nextEtag, persistWarning, serverTimings }
+        if (key === 'database/database.bin') recordSyncDiagnostic('patch-accepted', {
+            operations: patchData.patch.length,
+            roots: [...new Set(patchData.patch.map(operation => String(operation.path).split('/')[1]?.slice(0, 80) ?? ''))].slice(0, 20),
+            unchanged: data.unchanged === true, etag: nextEtag ?? null,
+        })
+        return { success: true, etag: nextEtag, persistWarning, serverTimings, ...(data.unchanged === true ? { unchanged: true } : {}) }
     }
 
     // ── Bulk asset operations (3-2-B) ──────────────────────────────────────────

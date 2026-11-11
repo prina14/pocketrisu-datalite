@@ -207,3 +207,16 @@ test('batch cap eviction removes old copies only and preserves all new batch val
     expect(await copies.revisions('plugin:')).toEqual([['a', 'r-a'], ['b', 'r-b']])
     db.close()
 })
+
+test('checked DB puts report quota failures while ordinary optional puts remain non-fatal', async () => {
+    const { transferCache: copies } = await import('./transferCache')
+    const db = await openCacheDb()
+    const proto = Object.getPrototypeOf(db.transaction('copies').objectStore('copies'))
+    const put = vi.spyOn(proto, 'put').mockImplementation(() => { throw new DOMException('quota', 'QuotaExceededError') })
+    await expect(copies.putChecked!('db:database/database.bin', 'new', new Uint8Array([9]))).rejects.toMatchObject({ name: 'QuotaExceededError' })
+    await expect(copies.put('plugin:optional', 'new', new Uint8Array([9]))).resolves.toBeUndefined()
+    put.mockRestore()
+    await copies.putChecked!('db:database/database.bin', 'new', new Uint8Array([9]))
+    expect((await copies.get('db:database/database.bin'))?.etag).toBe('new')
+    db.close()
+})

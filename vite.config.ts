@@ -19,7 +19,8 @@ export default defineConfig(({command, mode}) => {
         transformIndexHtml(html) {
           const css = readFileSync('./src/styles/startup-shell.css', 'utf8');
           return html.replace('<!-- startup-style -->', `<style>${css}</style>`)
-            .replace('<!-- startup-layout -->', readFileSync('./src/etc/startup-layout.html', 'utf8'));
+            .replace('<!-- startup-layout -->', readFileSync('./src/etc/startup-layout.html', 'utf8'))
+            .replace('<!-- startup-presentation -->', `<script>${readFileSync('./src/ts/startupPresentation.js', 'utf8').replace(/^export /gm, '')}\napplyStartupPresentation(document.getElementById('preloading'));</script>`);
         },
       },
       svelte({

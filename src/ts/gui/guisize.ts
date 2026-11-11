@@ -1,5 +1,6 @@
 import { writable } from "svelte/store";
 import { getDatabase } from "../storage/database.svelte";
+import { cacheStartupPresentation } from '../startupPresentationCache';
 
 export let textAreaSize = writable(0)
 export let sideBarSize = writable(0)
@@ -15,6 +16,7 @@ export function updateGuisize(){
     sideBarSize.set(db.sideBarSize)
     textAreaTextSize.set(db.textAreaTextSize)
     root.style.setProperty('--sidebar-size', (24 + (4 * db.sideBarSize)) + 'rem')
+    cacheStartupPresentation(db)
 }
 
 export function guiSizeText(num:number){

@@ -5,10 +5,12 @@ import { get } from "svelte/store";
 import streamSaver from 'streamsaver';
 import { setDatabase, type Database, defaultSdDataFunc, getDatabase, appVer, nodeOnlyVer, getCurrentCharacter, loadTogglesFromChat } from "./storage/database.svelte";
 import { checkRisuUpdate } from "./update";
-import { MobileGUI, botMakerMode, selectedCharID, loadedStore, DBState, LoadingStatusState, selIdState, ReloadGUIPointer, bodyIntercepterStore, claimLoadingOverlay, chatDeselected } from "./stores.svelte";
+import { MobileGUI, botMakerMode, selectedCharID, loadedStore, DBState, LoadingStatusState, selIdState, ReloadGUIPointer, bodyIntercepterStore, claimLoadingOverlay, chatDeselected, popupStore, popUpEditorStore } from "./stores.svelte";
 import { recordDbTransferSize } from "./transferSize";
 import { measureStartupPhase } from './startup';
 import { newSaveTiming, recordSaveSample, type SaveOutcome, type SaveTiming } from "./storage/saveMetrics";
+import { recordSyncDiagnostic } from './storage/syncDiagnostics';
+import { registerUnsavedWork } from './storage/unsavedWork';
 import { loadPlugins } from "./plugins/plugins.svelte";
 import { alertClear, alertConfirm, alertConfirmMulti, alertError, alertMd, alertNormalWait, alertSelect, alertTOS, alertWait, waitAlert, notifySuccess, notifyError, notifyInfo } from "./alert";
 import { hasher } from "./parser/parser.svelte";
@@ -61,6 +63,7 @@ import { createAssetNameResolver, createBatchedResolve, type AssetNameHit } from
 import { addLog } from './log'
 
 export const forageStorage = new AutoStorage()
+registerUnsavedWork(() => popUpEditorStore.open || popupStore.children !== null)
 
 let lastBaselineResyncAt = 0
 const BASELINE_RESYNC_MIN_INTERVAL_MS = 5 * 60_000
@@ -576,6 +579,7 @@ export async function saveDb() {
     // selected character, so it cannot answer that).
     let editSeq = 0
     let savedEditSeq = 0
+    registerUnsavedWork(() => editSeq > savedEditSeq || saveInFlight !== null)
     const knownChatIdsByCharacter = new Map<string, Set<string>>(
         (getDatabase()?.characters ?? [])
             .filter(character => character?.chaId)
@@ -1361,6 +1365,13 @@ export async function saveDb() {
             lap()
             const patchData = await patcher.set(db, safeStructuredClone(toSave))
             timing.patchSetMs = lap()
+            if (patchData.patch.length === 0) {
+                // Reactive assignments can be dirty candidates with identical
+                // content. Chat writes above have already been acknowledged.
+                updateKnownChatsAfterSuccessfulSave(db, toSave)
+                recordSyncDiagnostic('patch-skipped-unchanged')
+                return 'saved'
+            }
             attemptedChangedCharIds = patcher.changedCharacterIdsOfLastSet()
             attemptedIdsAmbiguous = hasAmbiguousCharacterIds(db.characters ?? [])
             // Refuse to send patches that would corrupt server-side lazy chats.
@@ -1538,6 +1549,7 @@ export async function saveDb() {
                     // No full encode on a patch save: estimate the full-write
                     // payload from the patcher's per-entry JSON instead.
                     recordDbTransferSize(patcher.estimatePayloadBytes(), 'save')
+                    if (!patchResult.unchanged) forageStorage.scheduleDbCacheRefresh?.()
                 } else {
                     timing.fullWriteReason = 'rejected'
                 }
@@ -1655,6 +1667,7 @@ export async function saveDb() {
                 throw conflictErr
             }
             timing.fullWriteMs = lap()
+            forageStorage.scheduleDbCacheRefresh?.()
 
             // Re-init patcher from the data we just wrote so both sides
             // share the same baseline (including setDatabase defaults).
@@ -1794,6 +1807,7 @@ export async function saveDb() {
     }
 
     trackCharacterForSaveImpl = (chaId) => {
+        if (chaId) editSeq++
         if (chaId && !changeTracker.character.includes(chaId)) changeTracker.character.push(chaId)
     }
     trackChatForSaveImpl = (chaId, chatId) => {
