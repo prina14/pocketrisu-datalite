@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { characterActivity } from '../../ts/characterActivity';
     import {
     CharEmotion,
     DynamicGUI,
@@ -91,7 +92,7 @@
   // sort is cheap; the $derived is only read while on the home screen.
   let recentChars = $derived(
     DBState.db.characters
-      .map((c, index) => ({ index, name: c.name, image: c.image, lastInteraction: c.lastInteraction ?? 0, trashTime: c.trashTime }))
+      .map((c, index) => ({ index, name: c.name, image: c.image, lastInteraction: Math.max(c.lastInteraction ?? 0, $characterActivity[c.chaId] ?? 0), trashTime: c.trashTime }))
       .filter((c) => c.lastInteraction > 0 && !c.trashTime)
       .sort((a, b) => b.lastInteraction - a.lastInteraction)
   );

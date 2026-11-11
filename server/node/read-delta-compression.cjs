@@ -7,11 +7,11 @@ const INPUT_CHUNK_BYTES = 64 * 1024;
 const BROTLI_OPTIONS = { params: { [constants.BROTLI_PARAM_QUALITY]: 4 } };
 
 // A missing full snapshot must not delay a tiny DB update by seconds. This
-// shortcut is bounded to 16 KiB on the wire AND 1% of the full raw value.
+// shortcut is bounded to 64 KiB on the wire AND 1% of the full raw value.
 // Cached full encodings still get an exact size comparison. On a cold DB
-// the maximum extra body over an exceptionally compressible full is 16 KiB.
+// the maximum extra body over an exceptionally compressible full is 64 KiB.
 const isSmallColdDatabaseDelta = (packet, compressed, full) =>
-    compressed.length <= 16 * 1024 && packet.length <= full.length * 0.01;
+    compressed.length <= 64 * 1024 && packet.length <= full.length * 0.01;
 
 // Count the compressed full value only until it exceeds the delta's exact
 // encoded size. No flushes: preserve the normal whole-buffer representation.

@@ -13,10 +13,12 @@ const nodeCrypto = require('crypto')
 const zlib = require('zlib')
 const { MIN_DELTA_BYTES, MAX_COPY_BYTES, validManifest, makeDelta } = require('./readDelta.mjs');
 const { compareReadDeltaGzip, compareReadDeltaBrotli, isSmallColdDatabaseDelta } = require('./read-delta-compression.cjs');
-const { createReadSnapshotCache, gzipBytes, brotliBytes, preferredReadEncoding } = require('./read-snapshot-cache.cjs');
+const { createReadSnapshotCache, preferredReadEncoding, compressDeltaBytes } = require('./read-snapshot-cache.cjs');
 const { startupPreview } = require('./startup-preview.cjs');
 const { createStartupLoopProbe } = require('./startup-loop-probe.cjs');
 const startupLoopProbe = createStartupLoopProbe();
+const { createCharacterActivity } = require('./character-activity.cjs');
+const { isDeepStrictEqual } = require('node:util');
 const rateLimit = require('express-rate-limit')
 const { WebSocketServer } = require('ws')
 const Vips = require('wasm-vips')
@@ -92,6 +94,8 @@ const databasePatchHashCache = createPatchHashCache(calculateHash);
 
 // ETag for database.bin
 let dbEtag = null;
+let persistedClientReadView = null;
+let foregroundDatabaseReads = 0;
 const readViewTokens = new WeakMap();
 const databaseReadSnapshots = createReadSnapshotCache({ maxBytes: process.env.POCKETRISU_READ_SNAPSHOT_BYTES === undefined
     ? 64 * 1024 * 1024 : Number(process.env.POCKETRISU_READ_SNAPSHOT_BYTES) });
@@ -100,6 +104,7 @@ function scheduleDatabaseReadWarm() {
     if (databaseReadWarmTimer) clearTimeout(databaseReadWarmTimer);
     databaseReadWarmTimer = setTimeout(() => {
         databaseReadWarmTimer = null;
+        if (foregroundDatabaseReads > 0) { scheduleDatabaseReadWarm(); return; }
         // Wait for accepted writes, without adding a write or forcing a flush.
         void storageOperationQueue.then(async () => {
             if (!databaseReadSnapshots.canWarm()) return;
@@ -111,6 +116,7 @@ function scheduleDatabaseReadWarm() {
                 dbEtag = computeBufferEtag(bytes);
                 snapshot = databaseReadSnapshots.create(view, bytes, dbEtag);
             }
+            persistStartupIndex(view, snapshot.etag);
             return Promise.all([snapshot.getPreparedAsync(), snapshot.getGzip(), snapshot.getBrotli()]);
         }).catch(error => logger.warn('[Read snapshot] Optional warmup failed:', error?.message || error));
     }, 1000);
@@ -120,10 +126,11 @@ function readRevision(key) {
     const persisted = kvGetReadRevision(key);
     if (!persisted || key !== 'database/database.bin') return persisted;
     const view = dbCache[DB_HEX_KEY];
-    // Include the in-memory view identity and existing write validator so
-    // edits awaiting debounce and cache invalidations cannot appear current.
-    if (view && !readViewTokens.has(view)) readViewTokens.set(view, nodeCrypto.randomUUID());
-    return `${persisted}.${view ? readViewTokens.get(view) : 'cold'}.${dbEtag || 'unknown'}`;
+    // A disk-backed view remains current when loaded, encoded or warmed.
+    // Only accepted, not-yet-persisted replacements need a temporary token.
+    if (!view || view === persistedClientReadView) return `view2.${persisted}`;
+    if (!readViewTokens.has(view)) readViewTokens.set(view, nodeCrypto.randomUUID());
+    return `view2.${persisted}.pending.${readViewTokens.get(view)}`;
 }
 
 function computeBufferEtag(buffer) {
@@ -167,6 +174,37 @@ function queueStorageOperation(operation) {
 }
 
 const DB_HEX_KEY = Buffer.from('database/database.bin', 'utf-8').toString('hex');
+const STARTUP_INDEX_KEY = 'metadata/startup-index-v1';
+const STARTUP_INDEX_FORMAT = require('../../package.json').version;
+function readStartupIndex() {
+    const view = dbCache[DB_HEX_KEY];
+    if (view && view !== persistedClientReadView) return null;
+    const token = kvGetReadRevision.storedToken('database/database.bin');
+    if (!token) return null;
+    try {
+        const bytes = kvGet(STARTUP_INDEX_KEY);
+        if (!bytes || bytes.length > 64 * 1024) return null;
+        const value = JSON.parse(bytes.toString('utf8'));
+        if (value.format !== STARTUP_INDEX_FORMAT || value.token !== token || value.preview?.v !== 1
+            || value.preview.ready !== true || !Array.isArray(value.preview.names) || value.preview.names.length > 40
+            || !value.preview.names.every(name => typeof name === 'string' && name.length <= 128)
+            || !Number.isSafeInteger(value.preview.total) || value.preview.total < value.preview.names.length) return null;
+        if (value.etag !== null && (typeof value.etag !== 'string' || !/^[a-f0-9]{32}$/.test(value.etag))) return null;
+        return value;
+    } catch { return null; }
+}
+function persistStartupIndex(view, etag) {
+    if (!view || view !== persistedClientReadView || view !== dbCache[DB_HEX_KEY]) return;
+    try {
+        const token = kvGetReadRevision.storedToken('database/database.bin');
+        if (!token) return;
+        const existing = readStartupIndex();
+        const bytes = Buffer.from(JSON.stringify({ format: STARTUP_INDEX_FORMAT, token,
+            etag: etag ?? existing?.etag ?? null, preview: startupPreview(view, '') }));
+        const previous = kvGet(STARTUP_INDEX_KEY);
+        if (!previous?.equals(bytes)) kvSet(STARTUP_INDEX_KEY, bytes);
+    } catch (error) { logger.warn('[Startup index] Optional cache unavailable:', error?.message || error); }
+}
 const assetManifestStore = createAssetManifestStore(sqliteDb, {
     maxCacheBytes: process.env.POCKETRISU_ASSET_MANIFEST_CACHE_BYTES
         ? Number(process.env.POCKETRISU_ASSET_MANIFEST_CACHE_BYTES)
@@ -502,10 +540,13 @@ async function loadDbCacheIfMissing({ createBackup = false } = {}) {
     // its entry is carried across the rebuild (carryUnlistedChatPosts).
     const dbObj = await initChatStoreFromDisk(await decodeDatabaseWithPersistentChatIds(raw, { createBackup }));
     dbCache[DB_HEX_KEY] = normalizeJSON(stripDatabaseForClient(dbObj, { reconcileManifests: true }));
+    persistedClientReadView = dbCache[DB_HEX_KEY];
+    persistStartupIndex(persistedClientReadView);
     return true;
 }
 
 function invalidateDbCache() {
+    persistedClientReadView = null;
     databaseReadSnapshots.clear();
     delete dbCache[DB_HEX_KEY];
     fullChatStore = null;
@@ -1221,6 +1262,10 @@ async function persistDbCacheWithChats(filePath, decodedKey) {
     // would resurrect the cleared values until the next /api/read.
     if (decodedKey === 'database/database.bin') {
         initChatStore(fullDb);
+        if (dbCache[filePath] === strippedDb) {
+            persistedClientReadView = strippedDb;
+            persistStartupIndex(strippedDb, databaseReadSnapshots.get(strippedDb, dbEtag)?.etag);
+        }
         lastDbPersistMs = Math.round(performance.now() - persistStartedAt);
     }
 }
@@ -4064,7 +4109,9 @@ app.get('/api/startup-preview', async (req, res) => {
         const before = await risuAccountImport.status();
         phase('preview-guard');
         if (before.blocking) return res.json({ v: 1, ready: false });
-        const preview = await queueStorageOperation(async () => {
+        const cachedIndex = readStartupIndex();
+        res.setHeader('x-startup-preview-cache', cachedIndex ? 'hit' : 'miss');
+        const preview = cachedIndex ? { ...cachedIndex.preview, revision: readRevision('database/database.bin') } : await queueStorageOperation(async () => {
             if (!await loadDbCacheIfMissing({ createBackup: true })) return null;
             return startupPreview(dbCache[DB_HEX_KEY], readRevision('database/database.bin'));
         });
@@ -4115,6 +4162,9 @@ app.get('/api/test_auth', async(req, res, next) => {
         next(error);
     }
 });
+
+// Authenticated viewing metadata does not claim the content writer lock.
+createCharacterActivity(sqliteDb, { kvSet, kvDel }).register(app, checkAuth);
 
 app.post('/api/login', loginRouteLimiter, async (req, res) => {
     if(password === ''){
@@ -4477,6 +4527,7 @@ app.post('/api/set_password', async (req, res) => {
 })
 
 async function readStorage(req, res, next) {
+    let activeDatabaseRead = false;
     recordApiHandlerTiming(req, res);
     let phaseStarted = performance.now();
     const recordPhase = name => {
@@ -4521,13 +4572,25 @@ async function readStorage(req, res, next) {
                 res.setHeader('x-read-transfer', 'unchanged');
                 return res.status(304).end();
             }
+            // A validated persisted index can confirm identical client bytes
+            // after a process restart, without loading/encoding the big DB.
+            const index = isDb ? readStartupIndex() : null;
+            if (index?.etag && req.headers['if-none-match'] === index.etag) {
+                res.setHeader('x-read-transfer', 'unchanged');
+                res.setHeader('x-read-index-validator', '1');
+                return res.status(304).end();
+            }
             // No blob reads, serialization or hash calculation in this path.
             return res.status(200).end();
         }
-        // Metadata probes above include the in-memory view/ETag in their
-        // revision, so acknowledged patches invalidate them without forcing
+        // Metadata probes distinguish pending edits from the persisted view,
+        // so acknowledged patches invalidate them without forcing
         // a full DB encode/write. Body reads still flush before serving data.
-        if (isDb) await flushPendingDb();
+        if (isDb) {
+            foregroundDatabaseReads++;
+            activeDatabaseRead = true;
+            await flushPendingDb();
+        }
         recordPhase('read-flush');
         let value = null;
         let readSnapshot = null;
@@ -4572,6 +4635,7 @@ async function readStorage(req, res, next) {
             if (isDb) {
                 dbEtag = readSnapshot?.etag ?? computeBufferEtag(value);
                 readSnapshot ??= databaseReadSnapshots.create(readView, value, dbEtag);
+                persistStartupIndex(readView, dbEtag);
                 res.setHeader('x-db-etag', dbEtag);
                 res.setHeader('x-read-revision', readRevision(key));
                 recordPhase('read-hash');
@@ -4618,11 +4682,11 @@ async function readStorage(req, res, next) {
                     // otherwise compare with an early-stopping stream.
                     if (readSnapshot?.brotli) {
                         compressedFull = readSnapshot.brotli;
-                        compressedDelta = await brotliBytes(packet);
+                        compressedDelta = await compressDeltaBytes(packet, encoding);
                         useDelta = compressedDelta.length < compressedFull.length;
                         res.setHeader('x-read-compare-bytes', 0);
                     } else {
-                        compressedDelta = await brotliBytes(packet);
+                        compressedDelta = await compressDeltaBytes(packet, encoding);
                         if (isDb && isSmallColdDatabaseDelta(packet, compressedDelta, value)) {
                             res.setHeader('x-read-compare-bytes', 0);
                             res.setHeader('x-read-compare-policy', 'small-cold-delta');
@@ -4637,11 +4701,11 @@ async function readStorage(req, res, next) {
                     // The full gzip often dwarfs the small delta. Stop as soon
                     // as that is proven; keep compression off the event loop.
                     if (readSnapshot?.compressed) {
-                        compressedDelta = await gzipBytes(packet);
+                        compressedDelta = await compressDeltaBytes(packet, encoding);
                         useDelta = compressedDelta.length < readSnapshot.compressed.length;
                         res.setHeader('x-read-compare-bytes', 0);
                     } else {
-                        compressedDelta = await gzipBytes(packet);
+                        compressedDelta = await compressDeltaBytes(packet, encoding);
                         if (isDb && isSmallColdDatabaseDelta(packet, compressedDelta, value)) {
                             res.setHeader('x-read-compare-bytes', 0);
                             res.setHeader('x-read-compare-policy', 'small-cold-delta');
@@ -4670,6 +4734,11 @@ async function readStorage(req, res, next) {
     } catch (error) {
         logger.error('[Read] Failed to read stored data', error);
         next(error);
+    } finally {
+        if (activeDatabaseRead) {
+            foregroundDatabaseReads--;
+            if (!foregroundDatabaseReads) scheduleDatabaseReadWarm();
+        }
     }
 }
 app.get('/api/read', readStorage);
@@ -4843,6 +4912,7 @@ app.get('/api/list', async (req, res, next) => {
         } else {
             data = kvList(keyPrefix || undefined);
         }
+        data = data.filter(key => !key.startsWith('metadata/character-activity/') && key !== STARTUP_INDEX_KEY);
         res.send({ success: true, content: data });
     } catch (error) {
         next(error);
@@ -5129,14 +5199,17 @@ app.post('/api/write', async (req, res, next) => {
                 // cost one full decode after every full write.
                 if (persistedView) {
                     dbCache[DB_HEX_KEY] = persistedView;
+                    persistedClientReadView = persistedView;
                 } else {
                     delete dbCache[DB_HEX_KEY];
+                    persistedClientReadView = null;
                 }
                 if (saveTimers[DB_HEX_KEY]) {
                     clearTimeout(saveTimers[DB_HEX_KEY]);
                     delete saveTimers[DB_HEX_KEY];
                 }
                 dbEtag = persistedEtag;
+                persistStartupIndex(persistedClientReadView, persistedEtag);
                 createBackupAndRotate();
             }
 
@@ -5439,6 +5512,14 @@ app.post('/api/patch', async (req, res, next) => {
                     });
                     return;
                 }
+            }
+            if (isDeepStrictEqual(next, dbCache[filePath])) {
+                applyPluginKvOps();
+                const payload = { success: true, appliedOperations: pluginKvOps.length, unchanged: true,
+                    etag: decodedKey === 'database/database.bin' ? dbEtag ?? undefined : undefined };
+                const warning = currentPersistWarning();
+                if (warning) payload.persistWarning = warning;
+                return res.send(payload);
             }
             if (decodedKey === 'database/database.bin') {
                 databasePatchHashCache.update(dbCache[filePath], next, patch);

@@ -9,6 +9,7 @@ import { checkNullish, findCharacterbyId, findCharacterIndexbyId, getUserName, s
 import { v4 as uuidv4, v4 } from 'uuid';
 import { getImageType } from "./media";
 import { MobileGUIStack, OpenRealmStore, selectedCharID } from "./stores.svelte";
+import { recordCharacterOpen } from './characterActivity';
 import { AppendableBuffer, changeChatTo, checkCharOrder, downloadFile, getFileSrc, requiresFullEncoderReload } from "./globalApi.svelte";
 import { updateInlayScreen } from "./process/inlayScreen";
 import { parseMarkdownSafe } from "./parser/parser.svelte";
@@ -610,7 +611,7 @@ export function characterFormatUpdate(indexOrCharacter:number|character, arg:{
     if(checkNullish(cha.customscript)){
         cha.customscript = []
     }
-    cha.lastInteraction = Date.now()
+    if (arg.updateInteraction && cha.chaId) recordCharacterOpen(cha.chaId)
     if(typeof(indexOrCharacter) === 'number'){
         setCharacterByIndex(indexOrCharacter, cha)
     }

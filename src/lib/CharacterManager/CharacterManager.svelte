@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { characterActivity } from '../../ts/characterActivity';
     // Character manager: the management surface for the sidebar rail.
     // Desktop: overlay above the chat (z-40, chat stays mounted). Mobile:
     // mounted inline in the characters tab (`inline`, search from the header).
@@ -61,7 +62,7 @@
     let bulkBusy = $state(false);
 
     let search = $derived(externalSearch ?? searchLocal);
-    let entries = $derived(buildManagerEntries(DBState.db));
+    let entries = $derived(buildManagerEntries(DBState.db, $characterActivity));
     let liveEntries = $derived([...entries.values()].filter((e) => !e.trashed));
     let trashEntries = $derived([...entries.values()].filter((e) => e.trashed).filter((e) => matchesSearch(e.name, search)));
     let visible = $derived((e: ManagerEntry) => matchesSearch(e.name, search) && matchesFilter(e, filter));

@@ -1,4 +1,5 @@
 import { migrateLegacyTrash } from "./characterArchive";
+import { initCharacterActivity } from './characterActivity';
 import { startupPreview } from './stores.svelte';
 import { createStartupPreview, waitForStartupPreviewFrame, prefetchStartupPluginValues } from './startup';
 import { getStartupPreviewAfterAuth, getPrefetchedStartupPreview } from './earlyStartupPreview';
@@ -275,6 +276,7 @@ export async function loadData() {
             }, 5_000)
             scheduleAfterFirstPaint([
                 recordStartupUiFrame,
+                () => initCharacterActivity(globalThis.__NODE__ ? () => forageStorage.createAuth() : undefined),
                 () => forageStorage.flushDeferredCacheWrites(),
                 requestStoragePersistence,
                 checkRisuUpdate,

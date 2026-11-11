@@ -9,7 +9,8 @@ const br = (value: Uint8Array) => brotliCompressSync(value, { params: { [constan
 test('cold DB shortcut requires both small wire bytes and a tiny fraction of the full DB', () => {
     const full = Buffer.alloc(4 * 1024 * 1024)
     expect(isSmallColdDatabaseDelta(Buffer.alloc(23000), Buffer.alloc(3895), full)).toBe(true)
-    expect(isSmallColdDatabaseDelta(Buffer.alloc(23000), Buffer.alloc(16385), full)).toBe(false)
+    expect(isSmallColdDatabaseDelta(Buffer.alloc(23000), Buffer.alloc(17483), full)).toBe(true)
+    expect(isSmallColdDatabaseDelta(Buffer.alloc(23000), Buffer.alloc(65537), full)).toBe(false)
     expect(isSmallColdDatabaseDelta(Buffer.alloc(50000), Buffer.alloc(100), full)).toBe(false)
 })
 

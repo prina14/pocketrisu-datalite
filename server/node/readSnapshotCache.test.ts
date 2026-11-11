@@ -2,8 +2,15 @@ import { expect, test, vi } from 'vitest'
 import { createHash, randomBytes } from 'node:crypto'
 import { gunzipSync, brotliDecompressSync, createBrotliCompress, constants } from 'node:zlib'
 import { makeManifest, makeDelta, applyDelta, prepareDelta } from './readDelta.mjs'
-const { createReadSnapshotCache, preferredReadEncoding, brotliBytes } = require('./read-snapshot-cache.cjs')
+const { createReadSnapshotCache, preferredReadEncoding, brotliBytes, gzipBytes, compressDeltaBytes } = require('./read-snapshot-cache.cjs')
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex')
+
+test('bounded packet compression preserves the normal gzip and Brotli wire bytes', async () => {
+    for (const bytes of [randomBytes(56000), randomBytes(65536), randomBytes(65537)]) {
+        expect(hash(await compressDeltaBytes(bytes, 'br'))).toBe(hash(await brotliBytes(bytes)))
+        expect(hash(await compressDeltaBytes(bytes, 'gzip'))).toBe(hash(await gzipBytes(bytes)))
+    }
+})
 
 test('encoding selection preserves the compression middleware preference and client quality/opt-out', () => {
     for (const [header, expected] of [

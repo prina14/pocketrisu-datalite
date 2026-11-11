@@ -156,7 +156,9 @@ test('a Brotli delta does not wait for the pending whole-DB compression', async 
     }
     await write('before')
     const base = await read()
-    await write('after a small edit')
+    // Larger than the former 16 KiB compressed shortcut limit; it still must
+    // not wait for a pending full-DB Brotli artifact.
+    await write(randomBytes(24000).toString('base64'))
     const current = await read()
     const marker = path.join(srv.cwd, 'pending-brotli-' + hash(current.bytes))
     await expect.poll(() => readFile(marker, 'utf8').catch(() => 'missing'), { timeout: 8000 }).toBe('pending')
@@ -170,6 +172,8 @@ test('a Brotli delta does not wait for the pending whole-DB compression', async 
     expect(res.headers.get('x-db-etag')).toBe(current.etag)
     expect(res.headers.get('x-read-compare-policy')).toBe('small-cold-delta')
     expect(res.headers.get('x-read-compare-bytes')).toBe('0')
+    expect(Number(res.headers.get('content-length'))).toBeGreaterThan(16 * 1024)
+    expect(Number(res.headers.get('content-length'))).toBeLessThanOrEqual(64 * 1024)
     // Brotli may buffer the whole input for some data. Independence from the
     // shared full-snapshot promise is required even when early exit is absent.
     expect(Number(res.headers.get('x-read-compare-bytes'))).toBeLessThanOrEqual(current.bytes.length)

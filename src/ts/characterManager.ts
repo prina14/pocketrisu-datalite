@@ -23,7 +23,7 @@ export interface ManagerEntry {
 export type ManagerSort = 'order' | 'recent' | 'name' | 'created' | 'chats'
 export type ManagerFilter = 'all' | 'hidden' | 'archived'
 
-export function buildManagerEntries(db: Database): Map<string, ManagerEntry> {
+export function buildManagerEntries(db: Database, activity: Record<string, number> = {}): Map<string, ManagerEntry> {
     const hidden = new Set(db.nodeOnlyHiddenCharacterIds ?? [])
     const out = new Map<string, ManagerEntry>()
     for (let i = 0; i < db.characters.length; i++) {
@@ -35,7 +35,7 @@ export function buildManagerEntries(db: Database): Map<string, ManagerEntry> {
             name: c.name || 'Unnamed',
             image: c.image ?? '',
             chatCount: c.chats?.length ?? 0,
-            lastInteraction: c.lastInteraction ?? 0,
+            lastInteraction: Math.max(c.lastInteraction ?? 0, activity[c.chaId] ?? 0),
             creationDate: c.creation_date ?? 0,
             archived: false,
             hidden: hidden.has(c.chaId),
@@ -50,7 +50,7 @@ export function buildManagerEntries(db: Database): Map<string, ManagerEntry> {
             name: stub.name || 'Unnamed',
             image: stub.image ?? '',
             chatCount: stub.chatCount ?? 0,
-            lastInteraction: stub.lastInteraction ?? 0,
+            lastInteraction: Math.max(stub.lastInteraction ?? 0, activity[stub.chaId] ?? 0),
             creationDate: stub.creation_date ?? 0,
             archived: true,
             hidden: hidden.has(stub.chaId),

@@ -1,11 +1,14 @@
 'use strict';
 
-const { gzip, brotliCompress, constants } = require('node:zlib');
+const { gzip, brotliCompress, gzipSync, brotliCompressSync, constants } = require('node:zlib');
 const { createHash } = require('node:crypto');
 const Negotiator = require('negotiator');
 const { prepareDelta, MIN_DELTA_BYTES, MAX_COPY_BYTES } = require('./readDelta.mjs');
 const { createDeltaPreparer } = require('./read-delta-preparer.cjs');
 const deltaPreparer = createDeltaPreparer();
+// Start the small worker runtime during server boot, before the first large
+// read needs it. No DB bytes, compression or storage access are performed here.
+void deltaPreparer.prepare(Buffer.alloc(0)).catch(() => {});
 const MAX_WORKER_INPUT_BYTES = 32 * 1024 * 1024;
 
 const gzipBytes = bytes => new Promise((resolve, reject) => gzip(bytes, (error, result) => error ? reject(error) : resolve(result)));
@@ -14,6 +17,13 @@ const gzipBytes = bytes => new Promise((resolve, reject) => gzip(bytes, (error, 
 const brotliBytes = bytes => new Promise((resolve, reject) => brotliCompress(bytes,
     { params: { [constants.BROTLI_PARAM_QUALITY]: 4 } },
     (error, result) => error ? reject(error) : resolve(result)));
+// Bound synchronous work to one small packet so it cannot queue behind
+// multi-MB background zlib jobs. Large packets retain asynchronous compression.
+const compressDeltaBytes = async (bytes, encoding) => {
+    if (bytes.length > 64 * 1024) return encoding === 'gzip' ? gzipBytes(bytes) : brotliBytes(bytes);
+    return encoding === 'gzip' ? gzipSync(bytes) : brotliCompressSync(bytes,
+        { params: { [constants.BROTLI_PARAM_QUALITY]: 4 } });
+};
 const hashBytes = bytes => createHash('sha256').update(bytes).digest('hex');
 const preferredReadEncoding = req => req.headers['accept-encoding']
     ? new Negotiator(req).encoding(['br', 'gzip', 'deflate', 'identity'], ['br', 'gzip']) : 'identity';
@@ -84,4 +94,4 @@ function createReadSnapshotCache({ maxBytes = 64 * 1024 * 1024 } = {}) {
     };
 }
 
-module.exports = { createReadSnapshotCache, gzipBytes, brotliBytes, preferredReadEncoding };
+module.exports = { createReadSnapshotCache, gzipBytes, brotliBytes, preferredReadEncoding, compressDeltaBytes };

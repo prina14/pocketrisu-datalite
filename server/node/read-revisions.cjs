@@ -23,7 +23,11 @@ function createReadRevisions(db) {
     // A restored database must not reuse a validator from another process.
     const epoch = randomBytes(16).toString('hex');
     const select = db.prepare('SELECT hex(r.token) AS token FROM datalite_read_revisions r JOIN kv k ON k.key = r.key WHERE r.key = ?');
-    return key => { const row = select.get(key); return row ? `${epoch}.${row.token}` : null; };
+    const storedToken = key => select.get(key)?.token ?? null;
+    const read = key => { const token = storedToken(key); return token ? `${epoch}.${token}` : null; };
+    // Internal cache binding only. Public validators retain the process epoch.
+    read.storedToken = storedToken;
+    return read;
 }
 
 module.exports = { createReadRevisions };
