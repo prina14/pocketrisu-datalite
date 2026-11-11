@@ -579,6 +579,9 @@ export async function saveDb() {
     // selected character, so it cannot answer that).
     let editSeq = 0
     let savedEditSeq = 0
+    // set() advances the patcher's local baseline before the HTTP result is
+    // known. An empty diff after a failed attempt still needs server validation.
+    let patchBaselineAcknowledged = true
     registerUnsavedWork(() => editSeq > savedEditSeq || saveInFlight !== null)
     const knownChatIdsByCharacter = new Map<string, Set<string>>(
         (getDatabase()?.characters ?? [])
@@ -1363,12 +1366,15 @@ export async function saveDb() {
             syncedArchivedIds = patcher.baselineArchivedCharacterIds()
             syncedBaselineDb = patcher.baselineDb()
             lap()
+            const maySkipEmptyPatch = patchBaselineAcknowledged
+            patchBaselineAcknowledged = false
             const patchData = await patcher.set(db, safeStructuredClone(toSave))
             timing.patchSetMs = lap()
-            if (patchData.patch.length === 0) {
+            if (patchData.patch.length === 0 && maySkipEmptyPatch) {
                 // Reactive assignments can be dirty candidates with identical
                 // content. Chat writes above have already been acknowledged.
                 updateKnownChatsAfterSuccessfulSave(db, toSave)
+                patchBaselineAcknowledged = true
                 recordSyncDiagnostic('patch-skipped-unchanged')
                 return 'saved'
             }
@@ -1629,6 +1635,7 @@ export async function saveDb() {
             }
         }
         if (!saved) {
+            patchBaselineAcknowledged = false
             if (supportsPatchSync && !options?.forceFullWrite) {
                 console.warn('[Save] Patch conflict, falling through to full write...')
             }
@@ -1720,6 +1727,7 @@ export async function saveDb() {
                 if (result === 'saved') recordSample(timing.fullWriteReason ? 'full' : 'patch')
                 else if (result === 'retry') recordSample('retry')
                 if (result === 'saved') {
+                    patchBaselineAcknowledged = true
                     lastSavedSeq = seq
                     savedEditSeq = Math.max(savedEditSeq, editSeqAtStart)
                     savetrys = 0
