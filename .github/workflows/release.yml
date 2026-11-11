@@ -54,6 +54,7 @@ jobs:
             package.json
             pnpm-lock.yaml
             update.sh
+            https.sh
           retention-days: 1
 
   portable:
@@ -304,6 +305,10 @@ jobs:
         shell: bash
         run: |
           cd portable
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            bash -n ./https.sh
+            bash ./https.sh --help >/dev/null
+          fi
           if [ "${{ matrix.platform }}" = "win" ]; then NODE=bin/node.exe; else NODE=bin/node; fi
           PORT=6099 "./$NODE" server/node/server.cjs > smoke.log 2>&1 &
           SERVER_PID=$!
