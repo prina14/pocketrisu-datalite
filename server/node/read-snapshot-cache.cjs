@@ -4,6 +4,9 @@ const { gzip, brotliCompress, constants } = require('node:zlib');
 const { createHash } = require('node:crypto');
 const Negotiator = require('negotiator');
 const { prepareDelta, MIN_DELTA_BYTES, MAX_COPY_BYTES } = require('./readDelta.mjs');
+const { createDeltaPreparer } = require('./read-delta-preparer.cjs');
+const deltaPreparer = createDeltaPreparer();
+const MAX_WORKER_INPUT_BYTES = 32 * 1024 * 1024;
 
 const gzipBytes = bytes => new Promise((resolve, reject) => gzip(bytes, (error, result) => error ? reject(error) : resolve(result)));
 // Match compression@1.8's Brotli quality, preserving the existing HTTPS
@@ -29,13 +32,24 @@ function createReadSnapshotCache({ maxBytes = 64 * 1024 * 1024 } = {}) {
         get(view, etag) { return current && current.owner?.deref() === view && current.etag === etag ? current : null; },
         create(view, raw, etag) {
             const owner = view && typeof view === 'object' ? new WeakRef(view) : null;
-            const entry = { owner, raw, etag, prepared: null, compressed: null, pendingGzip: null, brotli: null, pendingBrotli: null,
+            const entry = { owner, raw, etag, prepared: null, pendingPrepared: null, compressed: null, pendingGzip: null, brotli: null, pendingBrotli: null,
                 getPrepared() {
                     if (!this.prepared && raw.length >= MIN_DELTA_BYTES && raw.length <= MAX_COPY_BYTES) {
                         this.prepared = prepareDelta(raw, hashBytes);
                         fits(this);
                     }
                     return this.prepared;
+                },
+                getPreparedAsync() {
+                    if (this.prepared || raw.length < MIN_DELTA_BYTES || raw.length > MAX_COPY_BYTES) return Promise.resolve(this.prepared);
+                    if (raw.length > MAX_WORKER_INPUT_BYTES) return Promise.resolve(this.getPrepared());
+                    this.pendingPrepared ??= deltaPreparer.prepare(raw).then(index => {
+                        // Attach the exact original byte identity used by makeDelta.
+                        this.prepared ??= { data: raw, ...index };
+                        fits(this);
+                        return this.prepared;
+                    }).catch(() => this.getPrepared()); // Worker failure must not prevent a valid read.
+                    return this.pendingPrepared;
                 },
                 getGzip() {
                     if (!this.pendingGzip) {

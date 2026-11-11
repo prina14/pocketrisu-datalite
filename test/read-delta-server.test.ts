@@ -2,6 +2,9 @@
 import { afterAll, expect, test } from 'vitest'
 import { createHash, randomBytes } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
+import { readFile } from 'node:fs/promises'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Packr } from 'msgpackr'
 import { spawnServer, type ServerHandle } from './compat/helpers/spawnServer.js'
 import { createClient } from './compat/helpers/client.js'
@@ -112,13 +115,13 @@ test('wire-size selection keeps the full response when its gzip beats a raw-smal
     }, body: next })
     expect(write.status).toBe(200); await write.text()
     const manifest = JSON.stringify(makeManifest(base, hash))
-    for (const encoding of ['gzip', 'identity']) {
+    for (const encoding of ['gzip', 'br', 'identity']) {
         const res = await client.fetch('/api/read-delta', { method: 'POST', headers: {
             'file-path': hex(key), 'content-type': 'application/json', 'accept-encoding': encoding,
         }, body: manifest })
         expect(res.status).toBe(200)
         const body = Buffer.from(await res.arrayBuffer())
-        if (encoding === 'gzip') {
+        if (encoding !== 'identity') {
             expect(res.headers.get('x-read-transfer')).toBe('full')
             expect(Number(res.headers.get('x-read-compare-bytes'))).toBe(next.length)
             expect(hash(body)).toBe(hash(next))
@@ -130,3 +133,47 @@ test('wire-size selection keeps the full response when its gzip beats a raw-smal
         }
     }
 })
+
+test('a Brotli delta does not wait for the pending whole-DB compression', async () => {
+    const preload = fileURLToPath(new URL('./compat/helpers/slow-brotli-preload.cjs', import.meta.url))
+    const srv = await spawnServer({ env: { NODE_OPTIONS: `--require=${preload}` } }); servers.push(srv)
+    const client = await createClient(srv.port, srv.password)
+    const key = 'database/database.bin'
+    const extra = randomBytes(6 * 1024 * 1024).toString('base64')
+    const packr = new Packr({ useRecords: false })
+    const header = Buffer.from([0, 82, 73, 83, 85, 83, 65, 86, 69, 0, 7])
+    async function write(username: string) {
+        const body = Buffer.concat([header, packr.encode({ characters: [], botPresets: [], personas: [], pluginCustomStorage: {}, username, extra })])
+        const res = await client.fetch('/api/write', { method: 'POST', headers: {
+            'file-path': hex(key), 'content-type': 'application/octet-stream',
+        }, body })
+        expect(res.ok).toBe(true); await res.text()
+    }
+    async function read() {
+        const res = await client.fetch('/api/read', { headers: { 'file-path': hex(key), 'accept-encoding': 'identity' } })
+        expect(res.ok).toBe(true)
+        return { bytes: Buffer.from(await res.arrayBuffer()), etag: res.headers.get('x-db-etag')! }
+    }
+    await write('before')
+    const base = await read()
+    await write('after a small edit')
+    const current = await read()
+    const marker = path.join(srv.cwd, 'pending-brotli-' + hash(current.bytes))
+    await expect.poll(() => readFile(marker, 'utf8').catch(() => 'missing'), { timeout: 8000 }).toBe('pending')
+    const res = await client.fetch('/api/read-delta', { method: 'POST', headers: {
+        'file-path': hex(key), 'content-type': 'application/json', 'accept-encoding': 'br', 'if-none-match': base.etag,
+    }, body: JSON.stringify(makeManifest(base.bytes, hash)), signal: AbortSignal.timeout(5000) })
+    expect(res.ok).toBe(true)
+    expect(res.headers.get('x-read-snapshot')).toBe('hit')
+    expect(res.headers.get('x-read-transfer')).toBe('delta')
+    expect(res.headers.get('content-encoding')).toBe('br')
+    expect(res.headers.get('x-db-etag')).toBe(current.etag)
+    expect(res.headers.get('x-read-compare-policy')).toBe('small-cold-delta')
+    expect(res.headers.get('x-read-compare-bytes')).toBe('0')
+    // Brotli may buffer the whole input for some data. Independence from the
+    // shared full-snapshot promise is required even when early exit is absent.
+    expect(Number(res.headers.get('x-read-compare-bytes'))).toBeLessThanOrEqual(current.bytes.length)
+    const packet = Buffer.from(await res.arrayBuffer())
+    expect(hash(applyDelta(base.bytes, packet, hash))).toBe(hash(current.bytes))
+    expect(await readFile(marker, 'utf8')).toBe('pending')
+}, 15_000)

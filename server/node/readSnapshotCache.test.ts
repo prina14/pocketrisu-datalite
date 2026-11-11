@@ -80,3 +80,21 @@ test('prepared delta is byte-identical to the original protocol and does not has
     different[0] ^= 1
     expect(Buffer.from(makeDelta(different, manifest, hash, prepared))).toEqual(Buffer.from(makeDelta(different, manifest, hash)))
 })
+
+test('worker preparation shares pending work and preserves exact bytes across cache replacement', async () => {
+    const cache = createReadSnapshotCache()
+    const base = randomBytes(2 * 1024 * 1024)
+    const changed = Buffer.concat([base.subarray(0, 50000), Buffer.from('insert'), base.subarray(50000)])
+    const entry = cache.create({}, changed, 'first')
+    const pending = entry.getPreparedAsync()
+    expect(entry.getPreparedAsync()).toBe(pending)
+    const replacement = cache.create({}, randomBytes(200000), 'second')
+    const [index, next] = await Promise.all([pending, replacement.getPreparedAsync()])
+    expect(index.data).toBe(changed)
+    expect(index.sha256).toBe(hash(changed))
+    const packet = makeDelta(changed, makeManifest(base, hash), hash, index)
+    expect(hash(applyDelta(base, packet, hash))).toBe(hash(changed))
+    expect(Buffer.from(packet).equals(Buffer.from(makeDelta(changed, makeManifest(base, hash), hash)))).toBe(true)
+    expect(next.sha256).toBe(hash(replacement.raw))
+    expect(entry.getPrepared()).toBe(index)
+})

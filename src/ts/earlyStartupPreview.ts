@@ -37,8 +37,14 @@ export async function fetchStartupPreview(request: (url: string, init: RequestIn
 
 export function peekStartupPreview(): EarlyStartupPreview | null { return early }
 
+// Observe the lightweight entry's request without starting another request.
+// Used by the mounted app while its authentication preflight is still waiting.
+export function getPrefetchedStartupPreview(): Promise<EarlyStartupPreview | null> {
+    return earlyRequest ?? Promise.resolve(early)
+}
+
 export async function getStartupPreviewAfterAuth(request: (url: string, init: RequestInit) => Promise<Response>): Promise<EarlyStartupPreview | null> {
-    const prefetched = earlyRequest ? await earlyRequest : null
+    const prefetched = await getPrefetchedStartupPreview()
     return prefetched ?? fetchStartupPreview(request)
 }
 

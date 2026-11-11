@@ -1,7 +1,7 @@
 import { migrateLegacyTrash } from "./characterArchive";
 import { startupPreview } from './stores.svelte';
 import { createStartupPreview, waitForStartupPreviewFrame, prefetchStartupPluginValues } from './startup';
-import { getStartupPreviewAfterAuth, peekStartupPreview } from './earlyStartupPreview';
+import { getStartupPreviewAfterAuth, getPrefetchedStartupPreview } from './earlyStartupPreview';
 import { changeFullscreen, checkNullish } from "./util"
 import { v4 as uuidv4 } from 'uuid';
 import { get } from "svelte/store";
@@ -47,8 +47,15 @@ export async function loadData() {
         const finishStartup = beginStartupPhase('load-data')
         let finishPostData = () => {}
         let previewAllowed = true
+        let databaseApplied = false
+        const showEarlyPreview = preview => {
+            if (preview && previewAllowed && !databaseApplied) startupPreview.set({ names: preview.names, total: preview.total, early: true })
+        }
         try {
             applyEarlyLanguage()
+            // Cookie-authenticated names can arrive after app mount, while
+            // test_auth is pending. The server already applied import guards.
+            void getPrefetchedStartupPreview().then(showEarlyPreview).catch(() => {})
             // A started RisuAI account import will replace all data, so the
             // app shows only its screen until it ends. When the status cannot
             // be read the boot goes on; the server still refuses every write.
@@ -60,6 +67,8 @@ export async function loadData() {
                 initialBackupReminder = boot.backupReminderEnabled
                 importStatusChecked = true
                 if (importStatus.blocking) {
+                    previewAllowed = false
+                    startupPreview.set(null)
                     accountImportBlocking.set(true)
                     finishStartup()
                     return
@@ -77,17 +86,16 @@ export async function loadData() {
             // treating an early unauthenticated answer as "disabled".
             let bootReminderEnabled = importStatusChecked ? readBootReminder() : undefined
 
-            let databaseApplied = false
-            if (importStatusChecked && !peekStartupPreview()) {
+            if (importStatusChecked) {
                 // First login has no cookie for the lightweight entry. Start a
                 // guarded list request now, in parallel with the full DB read.
+                // Consume an already-prefetched answer too: it may have arrived
+                // after appEntry's one-time peek but before this auth completes.
                 // Never apply this partial index to DBState or save tracking.
                 void measureStartupPhase('startup-preview-read', () => getStartupPreviewAfterAuth(async (url, init) => {
                     const auth = await forageStorage.createAuth()
                     return fetch(url, { ...init, headers: { 'risu-auth': auth } })
-                })).then(preview => {
-                    if (preview && previewAllowed && !databaseApplied) startupPreview.set({ names: preview.names, total: preview.total, early: true })
-                }).catch(() => {})
+                })).then(showEarlyPreview).catch(() => {})
             }
 
             let createdFreshDatabase = false

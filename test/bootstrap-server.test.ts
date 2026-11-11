@@ -1,6 +1,8 @@
 // @vitest-environment node
 import { afterAll, expect, test } from 'vitest'
-import { writeFile } from 'node:fs/promises'
+import { writeFile, access } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
 import { spawnServer, type ServerHandle } from './compat/helpers/spawnServer.js'
 import { createClient } from './compat/helpers/client.js'
 const servers: ServerHandle[] = []
@@ -60,4 +62,13 @@ test('password setup is never skipped by the boot extension', async () => {
     const response = await fetch(`http://127.0.0.1:${server.port}/api/test_auth`, { headers: bootHeaders })
     expect(await response.json()).toEqual({ status: 'unset' })
     expect(response.headers.get('set-cookie')).toBeNull()
+})
+
+test('API authentication bypasses static-file probes even when those probes are stalled', async () => {
+    const preload = fileURLToPath(new URL('./compat/helpers/slow-api-stat-preload.cjs', import.meta.url))
+    const server = await spawnServer({ env: { NODE_OPTIONS: `--require=${preload}` } }); servers.push(server)
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/test_auth`, { signal: AbortSignal.timeout(2000) })
+    expect(await response.json()).toEqual({ status: 'incorrect' })
+    expect(response.headers.get('server-timing')).toMatch(/request-to-handler;dur=/)
+    expect(await access(path.join(server.cwd, 'api-static-probed')).then(() => true, () => false)).toBe(false)
 })

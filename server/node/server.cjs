@@ -12,7 +12,7 @@ const fs = require('fs/promises')
 const nodeCrypto = require('crypto')
 const zlib = require('zlib')
 const { MIN_DELTA_BYTES, MAX_COPY_BYTES, validManifest, makeDelta } = require('./readDelta.mjs');
-const { compareReadDeltaGzip } = require('./read-delta-compression.cjs');
+const { compareReadDeltaGzip, compareReadDeltaBrotli, isSmallColdDatabaseDelta } = require('./read-delta-compression.cjs');
 const { createReadSnapshotCache, gzipBytes, brotliBytes, preferredReadEncoding } = require('./read-snapshot-cache.cjs');
 const { startupPreview } = require('./startup-preview.cjs');
 const rateLimit = require('express-rate-limit')
@@ -99,7 +99,7 @@ function scheduleDatabaseReadWarm() {
     databaseReadWarmTimer = setTimeout(() => {
         databaseReadWarmTimer = null;
         // Wait for accepted writes, without adding a write or forcing a flush.
-        void storageOperationQueue.then(() => {
+        void storageOperationQueue.then(async () => {
             if (!databaseReadSnapshots.canWarm()) return;
             const view = dbCache[DB_HEX_KEY];
             if (!view) return;
@@ -109,8 +109,7 @@ function scheduleDatabaseReadWarm() {
                 dbEtag = computeBufferEtag(bytes);
                 snapshot = databaseReadSnapshots.create(view, bytes, dbEtag);
             }
-            snapshot.getPrepared();
-            return Promise.all([snapshot.getGzip(), snapshot.getBrotli()]);
+            return Promise.all([snapshot.getPreparedAsync(), snapshot.getGzip(), snapshot.getBrotli()]);
         }).catch(error => logger.warn('[Read snapshot] Optional warmup failed:', error?.message || error));
     }, 1000);
     databaseReadWarmTimer.unref?.();
@@ -1341,6 +1340,17 @@ function shouldCompress(req, res) {
     return compression.filter(req, res);
 }
 
+// Capture API arrival before middleware. This does not include time before
+// Node receives the request, but exposes delays before a selected handler.
+app.use((req, res, next) => {
+    if (req.path.startsWith('/api/')) req.apiReceivedAt = performance.now();
+    next();
+});
+function recordApiHandlerTiming(req, res) {
+    if (req.apiReceivedAt !== undefined) res.append('Server-Timing',
+        `request-to-handler;dur=${(performance.now() - req.apiReceivedAt).toFixed(2)}`);
+}
+
 app.use(compression({
     filter: shouldCompress,
 }));
@@ -1349,7 +1359,13 @@ app.use('/assets', express.static(path.join(process.cwd(), 'dist/assets'), {
     maxAge: '1y',
     immutable: true,
 }));
-app.use(express.static(path.join(process.cwd(), 'dist'), {index: false, maxAge: 0}));
+const serveDist = express.static(path.join(process.cwd(), 'dist'), {index: false, maxAge: 0});
+app.use((req, res, next) => {
+    // API routes never resolve to files in dist/. Avoid a filesystem stat
+    // queued behind native compression in libuv's shared thread pool.
+    if (req.path === '/api' || req.path.startsWith('/api/')) return next();
+    return serveDist(req, res, next);
+});
 app.use(express.json({ limit: '100mb' }));
 
 // PocketRisu -> Termux native Android notification
@@ -4026,6 +4042,7 @@ app.get('/api/server-activity', async (req, res) => {
 // lightweight entry display names before downloading the application/DB.
 // No writer session is registered and no data is served before import guards.
 app.get('/api/startup-preview', async (req, res) => {
+    recordApiHandlerTiming(req, res);
     res.setHeader('Cache-Control', 'private, no-store');
     res.vary('Cookie');
     res.vary('risu-auth');
@@ -4059,6 +4076,7 @@ app.get('/api/startup-preview', async (req, res) => {
 });
 
 app.get('/api/test_auth', async(req, res, next) => {
+    recordApiHandlerTiming(req, res);
     // JWTs and the optional boot snapshot must never be served from HTTP cache.
     res.setHeader('Cache-Control', 'private, no-store');
     const started = performance.now();
@@ -4456,6 +4474,7 @@ app.post('/api/set_password', async (req, res) => {
 })
 
 async function readStorage(req, res, next) {
+    recordApiHandlerTiming(req, res);
     let phaseStarted = performance.now();
     const recordPhase = name => {
         const now = performance.now();
@@ -4580,7 +4599,8 @@ async function readStorage(req, res, next) {
             };
             if (deltaRead && value.length >= MIN_DELTA_BYTES && value.length <= MAX_COPY_BYTES) {
                 const hash = bytes => nodeCrypto.createHash('sha256').update(bytes).digest('hex');
-                const bytes = makeDelta(value, req.body, hash, readSnapshot?.getPrepared());
+                const prepared = readSnapshot ? await readSnapshot.getPreparedAsync() : null;
+                const bytes = makeDelta(value, req.body, hash, prepared);
                 // makeDelta owns its output; this view stays valid during
                 // async compression without another full-size byte copy.
                 const packet = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -4590,11 +4610,25 @@ async function readStorage(req, res, next) {
                 let useDelta = packet.length < value.length * 0.8;
                 let compressedDelta = null;
                 if (useDelta && encoding === 'br') {
-                    const reused = !!readSnapshot?.brotli;
-                    compressedDelta = await brotliBytes(packet);
-                    compressedFull = readSnapshot ? await readSnapshot.getBrotli() : await brotliBytes(value);
-                    useDelta = compressedDelta.length < compressedFull.length;
-                    res.setHeader('x-read-compare-bytes', reused ? 0 : value.length);
+                    // A cold or still-warming full snapshot must not hold up
+                    // a small delta. Bound the overhead for tiny DB changes;
+                    // otherwise compare with an early-stopping stream.
+                    if (readSnapshot?.brotli) {
+                        compressedFull = readSnapshot.brotli;
+                        compressedDelta = await brotliBytes(packet);
+                        useDelta = compressedDelta.length < compressedFull.length;
+                        res.setHeader('x-read-compare-bytes', 0);
+                    } else {
+                        compressedDelta = await brotliBytes(packet);
+                        if (isDb && isSmallColdDatabaseDelta(packet, compressedDelta, value)) {
+                            res.setHeader('x-read-compare-bytes', 0);
+                            res.setHeader('x-read-compare-policy', 'small-cold-delta');
+                        } else {
+                            const compared = await compareReadDeltaBrotli(packet, value, compressedDelta);
+                            useDelta = compared.smaller;
+                            res.setHeader('x-read-compare-bytes', compared.fullInputBytes);
+                        }
+                    }
                 }
                 if (useDelta && gzip) {
                     // The full gzip often dwarfs the small delta. Stop as soon
@@ -4604,9 +4638,15 @@ async function readStorage(req, res, next) {
                         useDelta = compressedDelta.length < readSnapshot.compressed.length;
                         res.setHeader('x-read-compare-bytes', 0);
                     } else {
-                        const compared = await compareReadDeltaGzip(packet, value);
-                        useDelta = compared.smaller;
-                        res.setHeader('x-read-compare-bytes', compared.fullInputBytes);
+                        compressedDelta = await gzipBytes(packet);
+                        if (isDb && isSmallColdDatabaseDelta(packet, compressedDelta, value)) {
+                            res.setHeader('x-read-compare-bytes', 0);
+                            res.setHeader('x-read-compare-policy', 'small-cold-delta');
+                        } else {
+                            const compared = await compareReadDeltaGzip(packet, value, compressedDelta);
+                            useDelta = compared.smaller;
+                            res.setHeader('x-read-compare-bytes', compared.fullInputBytes);
+                        }
                     }
                 }
                 recordPhase('read-compress-compare');

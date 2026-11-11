@@ -36,3 +36,21 @@ test('early names are escaped text in the public shell, with no requests or edit
     renderStartupPreview(validateStartupPreview(data))
     expect(document.body.children.length).toBe(0)
 })
+
+test('a mounted consumer receives a late prefetched index without another authenticated request', async () => {
+    vi.resetModules()
+    const module = await import('./earlyStartupPreview')
+    let respond!: (response: Response) => void
+    const request = vi.fn(() => new Promise<Response>(resolve => { respond = resolve }))
+    vi.stubGlobal('fetch', request)
+    expect(await module.getPrefetchedStartupPreview()).toBeNull()
+    const early = module.prefetchStartupPreview()
+    const mounted = module.getPrefetchedStartupPreview()
+    respond(Response.json(data))
+    expect(await mounted).toEqual(data)
+    expect(await early).toEqual(data)
+    const fallback = vi.fn(async () => Response.json(data))
+    expect(await module.getStartupPreviewAfterAuth(fallback)).toEqual(data)
+    expect(fallback).not.toHaveBeenCalled()
+    expect(request).toHaveBeenCalledTimes(1)
+})
