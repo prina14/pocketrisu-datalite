@@ -862,32 +862,52 @@ export type HashMismatchReport = {
 }
 
 /**
- * String map that keeps the UTF-8 byte total of its values. Sizes are counted
- * once per stored string, so the patcher's running payload estimate costs
- * only as much as the entries that changed.
+ * Optional comparison strings are prepared on first use from the patcher's
+ * normalized, owned snapshot. Protocol hashes are still ready at init.
  */
-class JsonSizeMap extends Map<string, string> {
+class JsonSizeMap {
+    private strings = new Map<string, string>()
+    private pending = new Map<string, unknown>()
     private sizes = new Map<string, number>()
-    totalBytes = 0
+    private bytes = 0
 
-    override set(key: string, value: string): this {
-        this.totalBytes -= this.sizes.get(key) ?? 0
+    seed(key: string, value: unknown): void {
+        this.delete(key)
+        this.pending.set(key, value)
+    }
+
+    get(key: string): string | undefined {
+        if (this.pending.has(key)) this.set(key, JSON.stringify(this.pending.get(key)))
+        return this.strings.get(key)
+    }
+
+    get totalBytes(): number {
+        for (const key of this.pending.keys()) this.get(key)
+        return this.bytes
+    }
+
+    set(key: string, value: string): this {
+        this.pending.delete(key)
+        this.bytes -= this.sizes.get(key) ?? 0
         const bytes = utf8ByteLength(value)
         this.sizes.set(key, bytes)
-        this.totalBytes += bytes
-        return super.set(key, value)
+        this.bytes += bytes
+        this.strings.set(key, value)
+        return this
     }
 
-    override delete(key: string): boolean {
-        this.totalBytes -= this.sizes.get(key) ?? 0
+    delete(key: string): boolean {
+        const pending = this.pending.delete(key)
+        this.bytes -= this.sizes.get(key) ?? 0
         this.sizes.delete(key)
-        return super.delete(key)
+        return this.strings.delete(key) || pending
     }
 
-    override clear(): void {
+    clear(): void {
+        this.pending.clear()
+        this.strings.clear()
         this.sizes.clear()
-        this.totalBytes = 0
-        super.clear()
+        this.bytes = 0
     }
 }
 
@@ -913,7 +933,7 @@ export class RisuSavePatcher {
     private lastModuleJsons = new JsonSizeMap();
     // UTF-8 size of the baseline presets block (presets have no per-item
     // string cache); refreshed only when presets are diffed.
-    private presetBytes = 0;
+    private presetBytes: number | null = 0;
     private moduleItemHashes = new Map<string, number>();
     // chaIds whose stubbed body hashed differently from the baseline in the
     // last set(): the characters the client actually changed, whether or not
@@ -966,7 +986,7 @@ export class RisuSavePatcher {
         return this.lastRootKeyJsons.totalBytes
             + this.lastCharJsons.totalBytes
             + this.lastModuleJsons.totalBytes
-            + this.presetBytes
+            + (this.presetBytes ??= utf8ByteLength(JSON.stringify(this.lastSyncedDb.botPresets ?? [])))
     }
 
     /**
@@ -1032,20 +1052,18 @@ export class RisuSavePatcher {
         }
         this.hashBlocks = {};
 
+        // Pin the server-owned plugin values before hashing, so stale legacy
+        // values aren't traversed only to be discarded immediately afterward.
+        if (Object.hasOwn(this.lastSyncedDb, 'pluginCustomStorage')) {
+            this.lastSyncedDb.pluginCustomStorage = {};
+        }
+
         const keys = Object.keys(this.lastSyncedDb)
 
         for (const key of keys) {
-            if (key !== 'characters') {
+            if (key !== 'characters' && !(key === 'modules' && Array.isArray(this.lastSyncedDb.modules))) {
                 this.hashBlocks[key] = calculateHash(this.lastSyncedDb[key]);
             }
-        }
-        // Plugin values live in the server kv (pluginStorageStore); the DB
-        // field is always {} on the server after its boot migration. Pin the
-        // baseline to {} so hash() matches the server's calculateHash(db) and
-        // set() never diffs (or copies) whatever a stale client object holds.
-        if (Object.hasOwn(this.lastSyncedDb, 'pluginCustomStorage')) {
-            this.lastSyncedDb.pluginCustomStorage = {};
-            this.hashBlocks['pluginCustomStorage'] = calculateHash({});
         }
 
         for (let i = 0; i < this.lastSyncedDb.characters.length; i++) {
@@ -1065,24 +1083,29 @@ export class RisuSavePatcher {
         // from the normalized form means any normalize-affecting value (shared
         // ref, Date, non-finite) makes raw≠baseline and falls safely to full path.
         const { characters: _c, botPresets: _b, modules: _m, ...normRootOnly } = this.lastSyncedDb
-        this.presetBytes = utf8ByteLength(JSON.stringify(this.lastSyncedDb.botPresets ?? []))
+        this.presetBytes = null
         this.lastRootKeyJsons = new JsonSizeMap();
         for (const key of Object.keys(normRootOnly)) {
-            this.lastRootKeyJsons.set(key, JSON.stringify(normRootOnly[key]))
+            this.lastRootKeyJsons.seed(key, normRootOnly[key])
         }
         this.lastCharJsons = new JsonSizeMap();
         for (const character of this.lastSyncedDb.characters) {
-            if (character?.chaId) this.lastCharJsons.set(character.chaId, JSON.stringify(character))
+            if (character?.chaId) this.lastCharJsons.seed(character.chaId, character)
         }
         this.lastModuleJsons = new JsonSizeMap();
         this.moduleItemHashes = new Map();
         const normModulesInit = Array.isArray(this.lastSyncedDb.modules) ? this.lastSyncedDb.modules : []
+        let modulesHash = SEED_ARRAY
         for (const m of normModulesInit) {
+            const itemHash = calculateHash(m)
+            modulesHash = (Math.imul(modulesHash, PRIME_MULTIPLIER) + itemHash) >>> 0
             if (typeof m?.id === 'string' && m.id) {
-                this.lastModuleJsons.set(m.id, JSON.stringify(m))
-                this.moduleItemHashes.set(m.id, calculateHash(m))
+                this.lastModuleJsons.seed(m.id, m)
+                this.moduleItemHashes.set(m.id, itemHash)
             }
         }
+        // Fold the exact per-item hashes once, including invalid/duplicate IDs.
+        if (Array.isArray(this.lastSyncedDb.modules)) this.hashBlocks.modules = modulesHash
     }
 
     /**

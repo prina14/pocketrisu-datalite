@@ -72,6 +72,26 @@ afterEach(async () => {
     if (app) await unmount(app)
     app = undefined
     document.body.replaceChildren()
+    state.startupPreview.set(null)
+    state.loadedStore.set(false)
+    state.accountImportBlocking.set(false)
+})
+
+test('preview appears before loaded, import blocking wins, and the preview leaves when ready', async () => {
+    state.loadedStore.set(false)
+    state.startupPreview.set({ names: ['Early character'], total: 1 })
+    const target = document.createElement('div')
+    document.body.appendChild(target)
+    app = mount(App, { target })
+    await tick()
+    expect(target.textContent).toContain('Early character')
+    state.accountImportBlocking.set(true)
+    await tick()
+    expect(target.textContent).not.toContain('Early character')
+    state.accountImportBlocking.set(false)
+    state.loadedStore.set(true)
+    await tick()
+    expect(target.querySelector('.startup-preview')).toBeNull()
 })
 
 test('pickers import only on demand and clear pending selections when closed before their modules mount', async () => {

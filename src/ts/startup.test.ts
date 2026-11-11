@@ -1,8 +1,39 @@
 // @vitest-environment node
 import { afterEach, expect, test, vi } from 'vitest'
+import { createStartupPreview, waitForStartupPreviewFrame } from './startup'
 import { beginStartupPhase, measureStartupPhase, readBootBackupReminderEnabled, readDatabaseWithIndexPrefetch, recordStartupUiFrame, scheduleAfterFirstPaint } from './startup'
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
+
+test('preview contains bounded names only and excludes trashed characters without mutating data', () => {
+    const characters = Array.from({ length: 100 }, (_, i) => ({ name: 'c' + i, trashTime: i === 0 ? 1 : 0 }))
+    const before = JSON.stringify(characters)
+    const preview = createStartupPreview(characters)
+    expect(preview.total).toBe(99)
+    expect(preview.names).toHaveLength(40)
+    expect(preview.names[0]).toBe('c1')
+    expect(JSON.stringify(characters)).toBe(before)
+})
+
+test('preview yields two frames and times out when animation is throttled', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('document', { visibilityState: 'visible' })
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.push(callback); return frames.length })
+    let ready = false
+    const pending = waitForStartupPreviewFrame().then(() => { ready = true })
+    frames.shift()!(0); await Promise.resolve()
+    expect(ready).toBe(false)
+    frames.shift()!(16); await pending
+    expect(ready).toBe(true)
+    const stalled = waitForStartupPreviewFrame()
+    await vi.advanceTimersByTimeAsync(100)
+    await stalled
+    vi.stubGlobal('document', { visibilityState: 'hidden' })
+    const calls = frames.length
+    await waitForStartupPreviewFrame()
+    expect(frames.length).toBe(calls)
+})
 
 test('UI frame diagnostics include navigation time and remain optional', () => {
     const measure = vi.fn()

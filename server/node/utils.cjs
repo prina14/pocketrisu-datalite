@@ -495,6 +495,17 @@ function encodeRisuSaveLegacy(data, compression = 'noCompression') {
     }
 }
 
+// Owned Buffer for HTTP reads: fill every byte once, avoiding a zero-filled
+// Uint8Array followed by a second full-size Buffer.from copy. The public
+// legacy encoder keeps its existing return type and compression behavior.
+function encodeRisuSaveLegacyBuffer(data) {
+    const encoded = packr.encode(data);
+    const result = Buffer.allocUnsafe(encoded.length + magicHeader.length);
+    result.set(magicHeader, 0);
+    result.set(encoded, magicHeader.length);
+    return result;
+}
+
 // --- Hash & normalization utilities for patch-based sync ---
 
 const PRIME_MULTIPLIER = 31;
@@ -623,6 +634,7 @@ module.exports = {
     // Functions
     decodeRisuSave,
     encodeRisuSaveLegacy,
+    encodeRisuSaveLegacyBuffer,
     calculateHash,
     normalizeJSON,
     normalizeForwardHeaders,

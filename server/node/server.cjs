@@ -35,7 +35,7 @@ const {
 } = require('./logs.cjs');
 const { createRequestLogs } = require('./request-logs.cjs');
 const { applyPatch } = require('fast-json-patch');
-const { decodeRisuSave, encodeRisuSaveLegacy, calculateHash, normalizeJSON, normalizeForwardHeaders, hasRemoteBlocks } = require('./utils.cjs');
+const { decodeRisuSave, encodeRisuSaveLegacy, encodeRisuSaveLegacyBuffer, calculateHash, normalizeJSON, normalizeForwardHeaders, hasRemoteBlocks } = require('./utils.cjs');
 const { createPatchHashCache, decodePointerSegment } = require('./patch-hash-cache.cjs');
 const { clonePatchSnapshot } = require('./patch-selective-clone.cjs');
 const pluginStorage = require('./plugin-storage-store.cjs');
@@ -4458,7 +4458,7 @@ async function readStorage(req, res, next) {
                     if (!loaded) return res.send();
                 }
                 recordPhase('read-load');
-                value = Buffer.from(encodeRisuSaveLegacy(dbCache[filePath]));
+                value = encodeRisuSaveLegacyBuffer(dbCache[filePath]);
                 recordPhase('read-encode');
             } catch (e) {
                 logger.error('[Read] Failed to strip chats from database.bin', e);
@@ -4502,7 +4502,10 @@ async function readStorage(req, res, next) {
             res.setHeader('x-read-full-bytes', value.length);
             if (deltaRead && value.length >= MIN_DELTA_BYTES && value.length <= MAX_COPY_BYTES) {
                 const hash = bytes => nodeCrypto.createHash('sha256').update(bytes).digest('hex');
-                const packet = Buffer.from(makeDelta(value, req.body, hash));
+                const bytes = makeDelta(value, req.body, hash);
+                // makeDelta owns its output; this view stays valid during
+                // async compression without another full-size byte copy.
+                const packet = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
                 recordPhase('read-delta');
                 // A mostly replaced or highly compressible value can be cheaper
                 // as a full response. Compare wire sizes, not just raw sizes.

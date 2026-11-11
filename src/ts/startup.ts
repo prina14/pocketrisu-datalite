@@ -17,12 +17,38 @@ export async function measureStartupPhase<T>(name: string, operation: () => T | 
     try { return await operation() } finally { finish() }
 }
 
+export function createStartupPreview(characters: Array<{ name?: string; trashTime?: number }>) {
+    const names: string[] = []
+    let total = 0
+    for (const character of characters) {
+        if (!character || character.trashTime) continue
+        total++
+        if (names.length < 40) names.push(typeof character.name === 'string' ? character.name : '')
+    }
+    return { names, total }
+}
+
+/** Yield a frame for the read-only preview; hidden/throttled pages must not
+ * be held by requestAnimationFrame indefinitely. No user data changes here.
+ */
+export function waitForStartupPreviewFrame(): Promise<void> {
+    if (typeof requestAnimationFrame !== 'function' ||
+        (typeof document !== 'undefined' && document.visibilityState === 'hidden')) return Promise.resolve()
+    return new Promise(resolve => {
+        let done = false
+        const finish = () => { if (!done) { done = true; clearTimeout(timer); resolve() } }
+        const timer = setTimeout(finish, 100)
+        try { requestAnimationFrame(() => { if (!done) requestAnimationFrame(finish) }) }
+        catch { finish() }
+    })
+}
+
 /** Rendering opportunity for the main UI, not proof of physical display or
  * an all-network-idle event. Include navigation/JS startup in this metric.
  */
-export function recordStartupUiFrame(): void {
+export function recordStartupUiFrame(name = 'navigation-to-ui-frame'): void {
     try {
-        performance.measure('pocketrisu:startup:navigation-to-ui-frame', { start: 0, end: performance.now() })
+        performance.measure(`pocketrisu:startup:${name}`, { start: 0, end: performance.now() })
     } catch { /* Optional diagnostics. */ }
 }
 

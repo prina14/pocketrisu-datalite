@@ -1,4 +1,6 @@
 <script lang="ts">
+    import StartupPreview from './lib/UI/StartupPreview.svelte';
+    import { startupPreview } from './ts/stores.svelte';
     import { DynamicGUI, settingsOpen, sideBarStore, openPresetList, presetSelectCallback, openCharacterManager, openModelPresetList, modelPresetSelectCallback, openModelProfileBrowser, openPersonaList, personaSelectCallback, openMemoryPresetList, memoryPresetSelectCallback, openThemePresetList, MobileGUI, loadedStore, accountImportBlocking, alertStore, LoadingStatusState, bookmarkListOpen, popupStore, popUpEditorStore } from './ts/stores.svelte';
     import Sidebar from './lib/SideBars/Sidebar.svelte';
     import { DBState } from './ts/stores.svelte';
@@ -232,6 +234,8 @@
         </div>
     {:else if $accountImportBlocking}
         <RisuAccountImportScreen />
+    {:else if !$loadedStore && $startupPreview}
+        <StartupPreview names={$startupPreview.names} total={$startupPreview.total} heading={language.character} loadingLabel={language.loading} />
     {:else if !$loadedStore}
         <div class="w-full h-full flex justify-center items-center text-textcolor text-xl bg-gray-900 flex-col">
             <div class="flex flex-row items-center">

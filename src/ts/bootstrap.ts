@@ -1,4 +1,6 @@
 import { migrateLegacyTrash } from "./characterArchive";
+import { startupPreview } from './stores.svelte';
+import { createStartupPreview, waitForStartupPreviewFrame } from './startup';
 import { changeFullscreen, checkNullish } from "./util"
 import { v4 as uuidv4 } from 'uuid';
 import { get } from "svelte/store";
@@ -149,6 +151,14 @@ export async function loadData() {
                 }
             }
             bootReminderEnabled ??= readBootReminder()
+            // Only authenticated, import-guarded server data reaches this
+            // read-only view. Don't mount the editable app against partial
+            // plugin/format/save initialization.
+            if (importStatusChecked) {
+                startupPreview.set(createStartupPreview(getDatabase().characters))
+                await measureStartupPhase('preview-frame', waitForStartupPreviewFrame)
+                recordStartupUiFrame('navigation-to-preview-frame')
+            }
             LoadingStatusState.text = "Loading Plugins..."
             try {
                 await measureStartupPhase('plugins', () => loadPlugins())
@@ -195,6 +205,7 @@ export async function loadData() {
                 console.warn('[bootstrap] boot backup reminder failed:', err)
             }
             loadedStore.set(true)
+            startupPreview.set(null)
             finishStartup()
 
             finishPostData = beginStartupPhase('post-data-init')
@@ -246,6 +257,7 @@ export async function loadData() {
             initModelJobRecovery()
             finishPostData()
         } catch (error) {
+            startupPreview.set(null)
             finishPostData()
             finishStartup()
             alertError(error)
