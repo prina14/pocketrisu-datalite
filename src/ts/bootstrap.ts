@@ -1,6 +1,6 @@
 import { migrateLegacyTrash } from "./characterArchive";
 import { startupPreview } from './stores.svelte';
-import { createStartupPreview, waitForStartupPreviewFrame } from './startup';
+import { createStartupPreview, waitForStartupPreviewFrame, prefetchStartupPluginValues } from './startup';
 import { changeFullscreen, checkNullish } from "./util"
 import { v4 as uuidv4 } from 'uuid';
 import { get } from "svelte/store";
@@ -151,6 +151,10 @@ export async function loadData() {
                 }
             }
             bootReminderEnabled ??= readBootReminder()
+            // V2's synchronous API still waits for every value before running.
+            // Start its shared read while the preview gets a frame instead of
+            // delaying the network until after that rendering opportunity.
+            prefetchStartupPluginValues(getDatabase().plugins, () => pluginStorageStore.preloadAll())
             // Only authenticated, import-guarded server data reaches this
             // read-only view. Don't mount the editable app against partial
             // plugin/format/save initialization.

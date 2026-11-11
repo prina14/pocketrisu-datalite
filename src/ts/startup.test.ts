@@ -1,9 +1,25 @@
 // @vitest-environment node
 import { afterEach, expect, test, vi } from 'vitest'
-import { createStartupPreview, waitForStartupPreviewFrame } from './startup'
+import { createStartupPreview, waitForStartupPreviewFrame, prefetchStartupPluginValues } from './startup'
 import { beginStartupPhase, measureStartupPhase, readBootBackupReminderEnabled, readDatabaseWithIndexPrefetch, recordStartupUiFrame, scheduleAfterFirstPaint } from './startup'
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
+
+test('V2 storage starts before preview work without waiting for it, and failed prefetch does not block startup', async () => {
+    let finish!: () => void
+    const preload = vi.fn(() => new Promise<void>(resolve => { finish = resolve }))
+    prefetchStartupPluginValues([{ enabled: true, version: '2.1' }], preload)
+    expect(preload).toHaveBeenCalledOnce()
+    // The helper returned while the shared store read was still pending.
+    finish()
+    await Promise.resolve()
+    for (const plugins of [null, [], [{ enabled: false, version: 2 }], [{ enabled: true, version: '3.0' }]]) {
+        prefetchStartupPluginValues(plugins, preload)
+    }
+    expect(preload).toHaveBeenCalledOnce()
+    prefetchStartupPluginValues([{ enabled: true, version: 2 }], () => Promise.reject(Error('offline')))
+    await new Promise(resolve => setTimeout(resolve, 0))
+})
 
 test('preview contains bounded names only and excludes trashed characters without mutating data', () => {
     const characters = Array.from({ length: 100 }, (_, i) => ({ name: 'c' + i, trashTime: i === 0 ? 1 : 0 }))

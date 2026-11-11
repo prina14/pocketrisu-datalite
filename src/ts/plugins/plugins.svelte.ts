@@ -14,6 +14,7 @@ import { pluginCodeTranspiler } from "./apiV3/transpiler";
 import * as pluginStorageStore from "./pluginStorageStore";
 import { PLUGIN_CUSTOM_STORAGE_KEY, applyPluginDbKey, installApprovedPlugins, pluginCustomStorageProxy } from "./pluginDbProxy";
 import { hydratePluginCharacterSnapshotSync, restorePluginCharacterManifest, restorePluginDbKey } from './pluginCharacterSnapshot';
+import { measureStartupPhase } from '../startup';
 
 export const customProviderStore = writable([] as string[])
 
@@ -495,8 +496,8 @@ export async function loadPlugins() {
     // forces a full preload into the store's cache.
     let storageReady = true
     try {
-        await pluginStorageStore.init()
-        if (pluginV2.length > 0) await pluginStorageStore.preloadAll()
+        await measureStartupPhase('plugins-index-wait', () => pluginStorageStore.init())
+        if (pluginV2.length > 0) await measureStartupPhase('plugins-storage-preload', () => pluginStorageStore.preloadAll())
     } catch (e) {
         storageReady = false
         console.error('[pluginStorage] init failed', e)
@@ -504,7 +505,7 @@ export async function loadPlugins() {
 
     if (storageReady || pluginV2.length === 0) {
         v2PreloadAlertShown = false
-        await loadV2Plugin(pluginV2)
+        await measureStartupPhase('plugins-v2-execute', () => loadV2Plugin(pluginV2))
     } else {
         // Never run V2 plugins against an empty store: their sync reads would
         // all return null and a plugin that then writes its defaults overwrites
@@ -518,7 +519,7 @@ export async function loadPlugins() {
         }
         await loadV2Plugin([])
     }
-    await loadV3Plugins(pluginV3)
+    await measureStartupPhase('plugins-v3-execute', () => loadV3Plugins(pluginV3))
 }
 
 export type PluginV2ProviderArgument = {

@@ -1,26 +1,13 @@
-import "./ts/polyfill";
-import "core-js/actual"
-import "./ts/log-capture"
-import "./ts/storage/database.svelte"
-import App from "./App.svelte";
-import { loadData } from "./ts/bootstrap";
-import { initHotkey } from "./ts/hotkey";
-import { initScrollbarAutoHide } from "./ts/gui/scrollbarAutoHide";
-import { preLoadCheck } from "./preload";
-import { mount } from "svelte";
+// Keep this entry independent of the application, polyfills and full CSS.
+// The inline HTML shell can paint while these larger modules are still loading.
+import { startAppAfterShellPaint, showStartupFailure } from './ts/startupShell';
 
 window.addEventListener('vite:preloadError', (event) => {
-    console.error("Chunk load error detected:", event);
-    alert("The server has been updated or the network connection has been lost. Please refresh the page.");
+    console.error('Chunk load error detected:', event);
+    showStartupFailure();
 });
 
-preLoadCheck()
-let app = mount(App, {
-    target: document.getElementById("app"),
+void startAppAfterShellPaint(() => import('./appEntry')).catch(error => {
+    console.error('Application startup failed:', error);
+    showStartupFailure();
 });
-loadData()
-initHotkey()
-initScrollbarAutoHide()
-document.getElementById('preloading').remove()
-
-export default app;

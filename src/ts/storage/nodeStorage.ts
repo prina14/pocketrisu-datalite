@@ -11,7 +11,7 @@ import { decodeRisuSave, encodeRisuSaveLegacy } from "./risuSave"
 import { normalizeChat } from "./database.svelte"
 import type { PatchServerTimings } from "./saveMetrics"
 import { transferCache, type TransferCopyInput, type TransferVersion } from './transferCache'
-import { measureStartupPhase } from '../startup'
+import { beginStartupPhase, measureStartupPhase } from '../startup'
 import { Sha256 } from '@aws-crypto/sha256-js'
 import { gzipSync } from 'fflate'
 import { MIN_DELTA_BYTES, makeManifest, applyDelta } from '../../../server/node/readDelta.mjs'
@@ -51,6 +51,7 @@ const defaultStorageFetch: StorageFetch = (input, init) => fetch(input, init)
 
 /** fetch, then read the response, both within AUTH_REQUEST_TIMEOUT_MS. */
 async function authRequest<T>(input: string, init: RequestInit, read: (response: Response) => Promise<T>): Promise<T> {
+    const finish = beginStartupPhase(`auth-${input.split('/').pop()}`)
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     // Raced as well as aborted, like risuAccountRequest.
@@ -65,6 +66,7 @@ async function authRequest<T>(input: string, init: RequestInit, read: (response:
         return await Promise.race([fetch(input, { ...init, signal: controller.signal }).then(read), timeout])
     } finally {
         clearTimeout(timer)
+        finish()
     }
 }
 const defaultAuthFetchRetryOptions: AuthFetchRetryOptions = {
@@ -839,7 +841,7 @@ export class NodeStorage{
             }, (res) => res.json())
 
             if(data.status === 'unset'){
-                const input = await digestPassword(await alertInput(language.setNodePassword))
+                const input = await digestPassword(await measureStartupPhase('auth-password-prompt', () => alertInput(language.setNodePassword)))
                 const status = await authRequest('/api/set_password',{
                     method: "POST",
                     body:JSON.stringify({
@@ -859,7 +861,7 @@ export class NodeStorage{
                 return
             }
             else if(data.status === 'incorrect'){
-                const input = await digestPassword(await alertInput(language.inputNodePassword))
+                const input = await digestPassword(await measureStartupPhase('auth-password-prompt', () => alertInput(language.inputNodePassword)))
                 await this.loginWithPassword(input)
                 await this.initSession()
                 return

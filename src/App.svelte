@@ -1,5 +1,6 @@
 <script lang="ts">
     import StartupPreview from './lib/UI/StartupPreview.svelte';
+    import StartupShell from './lib/UI/StartupShell.svelte';
     import { startupPreview } from './ts/stores.svelte';
     import { DynamicGUI, settingsOpen, sideBarStore, openPresetList, presetSelectCallback, openCharacterManager, openModelPresetList, modelPresetSelectCallback, openModelProfileBrowser, openPersonaList, personaSelectCallback, openMemoryPresetList, memoryPresetSelectCallback, openThemePresetList, MobileGUI, loadedStore, accountImportBlocking, alertStore, LoadingStatusState, bookmarkListOpen, popupStore, popUpEditorStore } from './ts/stores.svelte';
     import Sidebar from './lib/SideBars/Sidebar.svelte';
@@ -237,17 +238,7 @@
     {:else if !$loadedStore && $startupPreview}
         <StartupPreview names={$startupPreview.names} total={$startupPreview.total} heading={language.character} loadingLabel={language.loading} />
     {:else if !$loadedStore}
-        <div class="w-full h-full flex justify-center items-center text-textcolor text-xl bg-gray-900 flex-col">
-            <div class="flex flex-row items-center">
-                <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-textcolor" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-                </svg>
-                <span>Loading...</span>
-            </div>
-
-            <span class="text-sm mt-2 text-textcolor2">{LoadingStatusState.text}</span>
-        </div>
+        <StartupShell heading={language.character} status={LoadingStatusState.text || language.loading} />
     {:else if $settingsOpen}
         <LazyBoundary load={loadSettings} close={() => { $settingsOpen = false; }}>
             {#snippet children(Settings)}<Settings />{/snippet}

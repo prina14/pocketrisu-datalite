@@ -94,6 +94,19 @@ test('preview appears before loaded, import blocking wins, and the preview leave
     expect(target.querySelector('.startup-preview')).toBeNull()
 })
 
+test('the public layout remains visible while authentication and DB loading are pending', async () => {
+    const target = document.createElement('div')
+    document.body.appendChild(target)
+    app = mount(App, { target })
+    await tick()
+    expect(target.querySelector('.startup-shell')).not.toBeNull()
+    expect(target.textContent).toContain('PocketRisu')
+    expect(target.querySelector('.startup-shell img, .startup-shell button, .startup-shell input')).toBeNull()
+    state.loadedStore.set(true)
+    await tick()
+    expect(target.querySelector('.startup-shell')).toBeNull()
+})
+
 test('pickers import only on demand and clear pending selections when closed before their modules mount', async () => {
     const target = document.createElement('div')
     document.body.appendChild(target)

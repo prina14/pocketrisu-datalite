@@ -28,6 +28,15 @@ export function createStartupPreview(characters: Array<{ name?: string; trashTim
     return { names, total }
 }
 
+/** Only V2 uses synchronous storage. The store shares its pending preload
+ * with loadPlugins; failures are retried there with its normal safety guard. */
+export function prefetchStartupPluginValues(plugins: unknown, preload: () => Promise<unknown>): void {
+    if (!Array.isArray(plugins) || !plugins.some(plugin =>
+        plugin?.enabled && (plugin.version === 2 || plugin.version === '2.1'))) return
+    try { void measureStartupPhase('plugins-values-prefetch', preload).catch(() => {}) }
+    catch { /* Optional prefetch must not change the normal guarded load. */ }
+}
+
 /** Yield a frame for the read-only preview; hidden/throttled pages must not
  * be held by requestAnimationFrame indefinitely. No user data changes here.
  */
