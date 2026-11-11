@@ -28,8 +28,8 @@ export function showStartupFailure(): void {
         return
     }
     shell.setAttribute('aria-busy', 'false')
-    const status = document.getElementById('startup-status')
-    if (status) status.textContent = 'Unable to connect. Please reload.'
+    const statuses = shell.querySelectorAll('[data-startup-status], #startup-status')
+    statuses.forEach(status => { status.textContent = 'Unable to connect. Please reload.' })
     const retry = document.getElementById('startup-retry') as HTMLButtonElement | null
     if (retry) {
         retry.hidden = false

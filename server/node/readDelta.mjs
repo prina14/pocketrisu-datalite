@@ -44,6 +44,19 @@ export function makeManifest(data, hash) {
     return { v: 1, size: data.length, chunks: blocks.map(([offset, size]) => [size, hash(data.subarray(offset, offset + size))]) }
 }
 
+// Native browser digests are asynchronous. Bound the in-flight calls rather
+// than creating tens of thousands of crypto jobs for a large value at once.
+export async function makeManifestAsync(data, hash) {
+    const blocks = chunks(data)
+    if (blocks.length > MAX_CHUNKS) return null
+    const result = []
+    for (let i = 0; i < blocks.length; i += 64) {
+        result.push(...await Promise.all(blocks.slice(i, i + 64).map(async ([offset, size]) =>
+            [size, await hash(data.subarray(offset, offset + size))])))
+    }
+    return { v: 1, size: data.length, chunks: result }
+}
+
 export function validManifest(manifest) {
     if (manifest?.v !== 1 || !Number.isSafeInteger(manifest.size) || manifest.size < 0 || manifest.size > MAX_COPY_BYTES ||
         !Array.isArray(manifest.chunks) || manifest.chunks.length > MAX_CHUNKS) return false
@@ -89,14 +102,21 @@ export function makeDelta(data, manifest, hash, prepared) {
     return packet
 }
 
-export function applyDelta(base, packet, hash) {
+function reconstructDelta(base, packet, manifest) {
     if (packet.length < 4) throw new Error('Truncated read delta')
     const headerSize = new DataView(packet.buffer, packet.byteOffset, packet.byteLength).getUint32(0, true)
     if (headerSize > 4 * 1024 * 1024 || headerSize > packet.length - 4) throw new Error('Invalid read delta header')
     const header = JSON.parse(new TextDecoder().decode(packet.subarray(4, 4 + headerSize)))
     if (header.v !== 1 || !Number.isSafeInteger(header.size) || header.size < 0 || header.size > MAX_COPY_BYTES ||
         !Array.isArray(header.ops) || header.ops.length > MAX_CHUNKS * 2 || !/^[a-f0-9]{64}$/.test(header.sha256)) throw new Error('Invalid read delta')
-    const blocks = chunks(base)
+    // The manifest was already constructed from this base before the request.
+    // Reuse its lengths; the final whole-value checksum still authenticates
+    // reconstruction, including corrupt/stale optional boundary metadata.
+    let blocks
+    if (manifest && manifest.size === base.length && validManifest(manifest)) {
+        let start = 0
+        blocks = manifest.chunks.map(([size]) => { const block = [start, size]; start += size; return block })
+    } else blocks = chunks(base)
     const output = new Uint8Array(header.size)
     let offset = 0, literal = 4 + headerSize
     for (const op of header.ops) {
@@ -111,6 +131,18 @@ export function applyDelta(base, packet, hash) {
         if (bytes.length > output.length - offset) throw new Error('Oversized read delta')
         output.set(bytes, offset); offset += bytes.length
     }
-    if (offset !== output.length || literal !== packet.length || hash(output) !== header.sha256) throw new Error('Read delta checksum mismatch')
+    if (offset !== output.length || literal !== packet.length) throw new Error('Read delta checksum mismatch')
+    return { output, sha256: header.sha256 }
+}
+
+export function applyDelta(base, packet, hash, manifest) {
+    const { output, sha256 } = reconstructDelta(base, packet, manifest)
+    if (hash(output) !== sha256) throw new Error('Read delta checksum mismatch')
+    return output
+}
+
+export async function applyDeltaAsync(base, packet, hash, manifest) {
+    const { output, sha256 } = reconstructDelta(base, packet, manifest)
+    if (await hash(output) !== sha256) throw new Error('Read delta checksum mismatch')
     return output
 }

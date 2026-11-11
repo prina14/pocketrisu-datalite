@@ -1,5 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest'
 import { fetchStartupPreview, validateStartupPreview, renderStartupPreview } from './earlyStartupPreview'
+import STARTUP_LAYOUT_HTML from '../etc/startup-layout.html?raw'
 const data = { v: 1, ready: true, names: ['Alice', '<img src=x onerror=alert(1)>'], total: 2, revision: 'r1', language: 'ko' }
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.replaceChildren() })
 
@@ -25,12 +26,13 @@ test('a stalled fetch or response body cannot hold up bootstrap', async () => {
 })
 
 test('early names are escaped text in the public shell, with no requests or editing controls', () => {
-    document.body.innerHTML = '<section id="preloading"><h1></h1><span id="startup-status"></span><div class="shell-content"><p>Preparing</p><div class="shell-grid" aria-hidden="true"></div></div></section>'
+    document.body.innerHTML = `<section id="preloading">${STARTUP_LAYOUT_HTML}</section>`
     renderStartupPreview(validateStartupPreview(data))
     expect(document.querySelector('.shell-grid')!.textContent).toContain('<img src=x onerror=alert(1)>')
     expect(document.querySelector('img,button,input,a,iframe')).toBeNull()
-    expect(document.querySelector('.shell-grid')!.hasAttribute('aria-hidden')).toBe(false)
-    expect(document.querySelector('h1')!.textContent).toBe('캐릭터 2')
+    expect(document.querySelector('.shell-grid')!.getAttribute('aria-hidden')).toBe('false')
+    expect(document.querySelector('[data-startup-label="characterManager"]')!.textContent).toBe('캐릭터 관리')
+    expect(document.getElementById('preloading')!.dataset.startupTotal).toBe('2')
     document.body.replaceChildren()
     // An answer after app mount cannot recreate/overwrite the full application.
     renderStartupPreview(validateStartupPreview(data))

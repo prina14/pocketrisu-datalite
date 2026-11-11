@@ -1,9 +1,34 @@
 import { describe, expect, test } from 'vitest'
 import { createHash, randomBytes } from 'node:crypto'
-import { chunks, makeManifest, validManifest, makeDelta, applyDelta } from './readDelta.mjs'
+import { chunks, makeManifest, makeManifestAsync, validManifest, makeDelta, applyDelta, applyDeltaAsync } from './readDelta.mjs'
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex')
 
 describe('content-defined read deltas', () => {
+    test('native async hashes produce the identical manifest and verify reconstruction using the existing boundaries', async () => {
+        const base = randomBytes(2 * 1024 * 1024)
+        const next = Buffer.concat([base.subarray(0, 12000), Buffer.from('inserted'), base.subarray(12000)])
+        const asyncHash = async (bytes: Uint8Array) => hash(bytes)
+        const manifest = await makeManifestAsync(base, asyncHash)
+        expect(manifest).toEqual(makeManifest(base, hash))
+        const packet = makeDelta(next, manifest, hash)
+        expect(hash(await applyDeltaAsync(base, packet, asyncHash, manifest))).toBe(hash(next))
+        expect(hash(applyDelta(base, packet, hash, manifest))).toBe(hash(next))
+        expect(packet.length).toBeLessThan(base.length / 2)
+        const corrupt = Buffer.alloc(base.length)
+        expect(await applyDeltaAsync(corrupt, packet, asyncHash, manifest).then(() => false, () => true)).toBe(true)
+        const stale = { ...manifest, chunks: manifest.chunks.map(row => [...row]) }
+        const headerSize = new DataView(packet.buffer, packet.byteOffset).getUint32(0, true)
+        const header = JSON.parse(new TextDecoder().decode(packet.subarray(4, 4 + headerSize)))
+        const used = header.ops.find(op => op[0] === 0)[1]
+        const other = used === 0 ? 1 : 0
+        const change = stale.chunks[used][0] === 32768 ? -1 : 1
+        stale.chunks[used][0] += change; stale.chunks[other][0] -= change
+        expect(validManifest(stale)).toBe(true)
+        // Moving a boundary between adjacent copied chunks can legitimately
+        // reconstruct the identical bytes. Wrong output must never be accepted.
+        const result = await applyDeltaAsync(base, packet, asyncHash, stale).then(bytes => hash(bytes), () => null)
+        expect([null, hash(next)]).toContain(result)
+    })
     test('a small edit plus an insertion into a 3 MiB value transfers less than 5%', () => {
         const old = randomBytes(3 * 1024 * 1024)
         const next = Buffer.concat([old.subarray(0, 12345), Buffer.from('inserted text'), old.subarray(12345)])

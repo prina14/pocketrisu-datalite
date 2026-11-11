@@ -6,7 +6,7 @@
 
 > A custom build of PocketRisu focused on reducing mobile-web data transfer through persistent caching, conditional reads, and content-defined chunk synchronization.
 
-- **커스텀 버전:** `v1.17.0-datalite.17` — PocketRisu DataLite 17
+- **커스텀 버전:** `v1.17.0-datalite.18` — PocketRisu DataLite 18
 - **원본 기반:** [PocketRisu v1.17.0](https://github.com/PocketRisu/PocketRisu), commit `40851fc9831856a36cb5c14799c1f501f32dc133`
 - **원본과의 관계:** PocketRisu의 커스텀 빌드이며, 원본 프로젝트의 공식 배포판과 구분됩니다.
 - **라이선스:** [GPL-3.0](LICENSE)
@@ -52,7 +52,7 @@
 - [공인 IP:6001 HTTPS 자동 설정·복구](docs/ko/ip-https.md)
 - [데이터 절약 기능과 확인 방법](docs/ko/data-lite.md)
 - [모든 채팅의 기본 캐시와 저장 후 갱신](docs/ko/chat-cache.md)
-- [DataLite 17 릴리스 노트](docs/releases/v1.17.0-datalite.17.md)
+- [DataLite 18 릴리스 노트](docs/releases/v1.17.0-datalite.18.md)
 - [초기 로딩 구조와 최적화](docs/ko/startup-performance.md)
 - [첫 화면의 외부 CSS 대기 제거](docs/ko/first-paint-blockers.md)
 - [대량 캐릭터·대화 최적화](docs/ko/large-history-performance.md)
@@ -65,6 +65,7 @@
 - [저장 기준 초기화·서버 복사 감소](docs/ko/lazy-save-baseline.md)
 - [캐릭터 이름 먼저 표시](docs/ko/early-character-preview.md)
 - [앱 준비 전 기본 화면 표시](docs/ko/instant-startup-shell.md)
+- [로딩 화면 통일·네이티브 해시 계산](docs/ko/startup-layout-and-native-hash.md)
 - [작은 캐릭터 목록·서버 전송 완성본 재사용](docs/ko/prepared-startup.md)
 - [최적화 점검 보고서와 수정 우선순위](docs/ko/optimization-audit-2026-11-09.md)
 - [1GB 서버의 메모리 최적화](docs/ko/server-memory.md)

@@ -1,3 +1,4 @@
+import { updateStartupLayout } from './startupLayout';
 // Shared by the tiny entry and the application. No Svelte, DB, plugin or CSS
 // imports here: this module must not pull the application into the first paint.
 export type EarlyStartupPreview = {
@@ -60,24 +61,9 @@ export function recordStartupListFrame(): void {
 
 export function renderStartupPreview(preview: EarlyStartupPreview | null): void {
     const shell = document.getElementById('preloading')
-    const grid = shell?.querySelector('.shell-grid')
-    if (!preview || !shell || !grid) return
-    const heading = shell.querySelector('h1')
-    if (heading) heading.textContent = `${preview.language === 'ko' ? '캐릭터' : 'Characters'} ${preview.total}`
-    const status = shell.querySelector('#startup-status')
-    if (status) status.textContent = preview.language === 'ko' ? '준비 중…' : 'Preparing…'
-    shell.querySelector('.shell-content > p')?.remove()
-    grid.removeAttribute('aria-hidden')
-    grid.replaceChildren()
-    for (const name of preview.names) {
-        const card = document.createElement('div')
-        card.className = 'shell-card'
-        const label = document.createElement('span')
-        label.className = 'shell-name'
-        label.textContent = name
-        card.appendChild(label)
-        grid.appendChild(card)
-    }
+    if (!preview || !shell) return
+    updateStartupLayout(shell, { names: preview.names, total: preview.total, language: preview.language,
+        status: preview.language === 'ko' ? '준비 중…' : 'Preparing…' })
     shell.setAttribute('data-startup-list', 'true')
     recordStartupListFrame()
 }

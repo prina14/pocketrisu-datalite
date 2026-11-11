@@ -236,9 +236,9 @@
     {:else if $accountImportBlocking}
         <RisuAccountImportScreen />
     {:else if !$loadedStore && $startupPreview}
-        <StartupPreview names={$startupPreview.names} total={$startupPreview.total} early={$startupPreview.early ?? false} heading={language.character} loadingLabel={language.loading} />
+        <StartupPreview names={$startupPreview.names} total={$startupPreview.total} early={$startupPreview.early ?? false} heading={language.character} loadingLabel={language.loading} labels={language} />
     {:else if !$loadedStore}
-        <StartupShell heading={language.character} status={LoadingStatusState.text || language.loading} />
+        <StartupShell heading={language.character} status={language.loading} labels={language} />
     {:else if $settingsOpen}
         <LazyBoundary load={loadSettings} close={() => { $settingsOpen = false; }}>
             {#snippet children(Settings)}<Settings />{/snippet}

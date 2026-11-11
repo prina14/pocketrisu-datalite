@@ -12,15 +12,9 @@ import { normalizeChat } from "./database.svelte"
 import type { PatchServerTimings } from "./saveMetrics"
 import { transferCache, type TransferCopyInput, type TransferVersion } from './transferCache'
 import { beginStartupPhase, measureStartupPhase } from '../startup'
-import { Sha256 } from '@aws-crypto/sha256-js'
+import { readHashAsync } from './readDeltaHash'
 import { gzipSync } from 'fflate'
-import { MIN_DELTA_BYTES, makeManifest, applyDelta } from '../../../server/node/readDelta.mjs'
-
-function readHash(bytes: Uint8Array): string {
-    const hash = new Sha256()
-    hash.update(bytes)
-    return Buffer.from(hash.digestSync()).toString('hex')
-}
+import { MIN_DELTA_BYTES, makeManifestAsync, applyDeltaAsync } from '../../../server/node/readDelta.mjs'
 
 const AUTH_FETCH_TRANSIENT_MAX_RETRIES = 3
 const AUTH_FETCH_TRANSIENT_BASE_DELAY_MS = 500
@@ -713,7 +707,7 @@ export class NodeStorage{
             if (!probed.ok || !probed.headers.has('x-read-version-check')) da = probed
         }
         const manifest = !da && copy && copy.data.length >= MIN_DELTA_BYTES
-            ? await measured('delta-manifest', () => makeManifest(copy.data, readHash)) : null
+            ? await measured('delta-manifest', () => makeManifestAsync(copy.data, readHashAsync)) : null
         if (!da && manifest) {
             const text = JSON.stringify(manifest)
             const deltaHeaders = { ...headers, 'content-type': 'application/json' }
@@ -744,7 +738,7 @@ export class NodeStorage{
             data = Buffer.from(await measured('response-body', () => da.arrayBuffer()))
             if (da.headers.get('x-read-delta') === '1') {
                 if (!copy) throw new Error('Missing read delta base')
-                data = await measured('delta-apply', () => Buffer.from(applyDelta(copy.data, data, readHash)))
+                data = await measured('delta-apply', async () => Buffer.from(await applyDeltaAsync(copy.data, data, readHashAsync, manifest)))
             }
         } catch (error) {
             if (da.headers.get('x-read-delta') !== '1') throw error

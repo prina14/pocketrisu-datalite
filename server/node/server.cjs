@@ -15,6 +15,8 @@ const { MIN_DELTA_BYTES, MAX_COPY_BYTES, validManifest, makeDelta } = require('.
 const { compareReadDeltaGzip, compareReadDeltaBrotli, isSmallColdDatabaseDelta } = require('./read-delta-compression.cjs');
 const { createReadSnapshotCache, gzipBytes, brotliBytes, preferredReadEncoding } = require('./read-snapshot-cache.cjs');
 const { startupPreview } = require('./startup-preview.cjs');
+const { createStartupLoopProbe } = require('./startup-loop-probe.cjs');
+const startupLoopProbe = createStartupLoopProbe();
 const rateLimit = require('express-rate-limit')
 const { WebSocketServer } = require('ws')
 const Vips = require('wasm-vips')
@@ -1349,6 +1351,7 @@ app.use((req, res, next) => {
 function recordApiHandlerTiming(req, res) {
     if (req.apiReceivedAt !== undefined) res.append('Server-Timing',
         `request-to-handler;dur=${(performance.now() - req.apiReceivedAt).toFixed(2)}`);
+    res.append('Server-Timing', `event-loop-recent-max;dur=${startupLoopProbe.maxMs().toFixed(2)}`);
 }
 
 app.use(compression({

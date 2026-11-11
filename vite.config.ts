@@ -14,6 +14,14 @@ export default defineConfig(({command, mode}) => {
       '__APP_VERSION__': JSON.stringify(pkg.version),
     },
     plugins: [
+      {
+        name: 'inline-startup-layout',
+        transformIndexHtml(html) {
+          const css = readFileSync('./src/styles/startup-shell.css', 'utf8');
+          return html.replace('<!-- startup-style -->', `<style>${css}</style>`)
+            .replace('<!-- startup-layout -->', readFileSync('./src/etc/startup-layout.html', 'utf8'));
+        },
+      },
       svelte({
         preprocess: vitePreprocess(),
         onwarn: (warning, handler) => {
