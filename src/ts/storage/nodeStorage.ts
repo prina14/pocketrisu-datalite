@@ -1720,14 +1720,15 @@ export class NodeStorage{
      * answers with only the messages after it when the prefix verifies —
      * `deltaBase` is then set and `chat.message` holds just the rest.
      */
-    async fetchChatContentDelta(chaId: string, chatIndex: number, chatId: string, base: { count: number, fp: string } | null): Promise<{ chat: any, deltaBase: number | null } | null> {
+    async fetchChatContentDelta(chaId: string, chatIndex: number, chatId: string, base: { count: number, fp: string } | null, options?: { signal?: AbortSignal; prefetch?: boolean }): Promise<{ chat: any, deltaBase: number | null } | null> {
         const headers: Record<string, string> = { 'x-chat-id': chatId }
+        if (options?.prefetch) headers['x-chat-prefetch'] = '1'
         if (base) {
             headers['x-chat-base-count'] = String(base.count)
             headers['x-chat-base-fp'] = base.fp
         }
-        const da = await this.authFetchGetWithFirstByteTimeout(`/api/chat-content/${encodeURIComponent(chaId)}/${chatIndex}`, { headers })
-        if (da.status === 404) return null
+        const da = await this.authFetchGetWithFirstByteTimeout(`/api/chat-content/${encodeURIComponent(chaId)}/${chatIndex}`, { headers, signal: options?.signal })
+        if (da.status === 404 || (da.status === 204 && options?.prefetch)) return null
         if (da.status < 200 || da.status >= 300) throw new Error(`fetchChatContent error: ${da.status}`)
         const deltaHeader = da.headers.get('x-chat-delta-base')
         const deltaBase = deltaHeader !== null && base && Number(deltaHeader) === base.count ? base.count : null

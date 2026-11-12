@@ -116,7 +116,7 @@ export async function fetchChatFromServer(chaId: string, chatIndex: number, chat
 // changed crosses the wire for long chats. Exports and backups keep using
 // fetchChatFromServer above, which always transfers the whole chat.
 const chatDeltaSync = createChatDeltaSync({
-    fetchChatContentDelta: (chaId, chatIndex, chatId, base) => forageStorage.realStorage.fetchChatContentDelta(chaId, chatIndex, chatId, base),
+    fetchChatContentDelta: (chaId, chatIndex, chatId, base, options) => forageStorage.realStorage.fetchChatContentDelta(chaId, chatIndex, chatId, base, options),
     saveChatContentDelta: (chaId, chatIndex, chatId, chat, base) => forageStorage.realStorage.saveChatContentDelta(chaId, chatIndex, chatId, chat, base),
 }, indexedDbChatCopies)
 
@@ -241,4 +241,9 @@ export async function ensureCurrentChatReady(
     chaId: string,
 ): Promise<Chat | null> {
     return ensureChatHydrated(chats, chatPage, chaId)
+}
+
+/** Prepare the bounded persistent copy only. Selection still validates the server delta. */
+export async function prefetchChatCopy(chaId: string, chatIndex: number, chatId: string, signal: AbortSignal): Promise<void> {
+    await chatDeltaSync.fetchChat(chaId, chatIndex, chatId, { signal, prefetch: true })
 }

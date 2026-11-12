@@ -273,7 +273,7 @@
     async function loadStats() {
         try {
             const auth = await forageStorage.createAuth()
-            const res = await fetch('/api/db/stats', { headers: { 'risu-auth': auth } })
+            const res = await fetch('/api/db/stats?scope=backup', { headers: { 'risu-auth': auth } })
             if (!res.ok) return
             const json = await res.json()
             // Prefer backupDisk (mounts to actual backup destination); fall

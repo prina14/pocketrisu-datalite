@@ -25,7 +25,7 @@ export { indexedDbChatCopies } from './chatCopyStore'
 // complete (verified prefix + fetched rest) or fetched whole.
 
 export interface ChatDeltaTransport {
-    fetchChatContentDelta(chaId: string, chatIndex: number, chatId: string, base: { count: number, fp: string } | null): Promise<{ chat: any, deltaBase: number | null } | null>
+    fetchChatContentDelta(chaId: string, chatIndex: number, chatId: string, base: { count: number, fp: string } | null, options?: { signal?: AbortSignal; prefetch?: boolean }): Promise<{ chat: any, deltaBase: number | null } | null>
     saveChatContentDelta(chaId: string, chatIndex: number, chatId: string, chat: any, base: { count: number, fp: string } | null): Promise<'ok' | 'base-mismatch'>
 }
 
@@ -58,7 +58,8 @@ export function createChatDeltaSync(transport: ChatDeltaTransport, copies: ChatC
         return run
     }
 
-    async function fetchChat(chaId: string, chatIndex: number, chatId: string): Promise<Chat | null> {
+    async function fetchChat(chaId: string, chatIndex: number, chatId: string, options?: { signal?: AbortSignal; prefetch?: boolean }): Promise<Chat | null> {
+        if (options?.signal?.aborted) return null
         const key = chatCopyKey(chaId, chatId)
         let copy: Chat | null = null
         try {
@@ -68,13 +69,14 @@ export function createChatDeltaSync(transport: ChatDeltaTransport, copies: ChatC
         } catch {
             copy = null
         }
+        if (options?.signal?.aborted) return null
         const copyFingerprints = copy ? messageFingerprints(copy.message) : null
         const base = copy && copy.message.length > 0 && copyFingerprints
             ? { count: copy.message.length, fp: prefixFingerprint(copyFingerprints, copy.message.length) }
             : null
 
-        const result = await transport.fetchChatContentDelta(chaId, chatIndex, chatId, base)
-        if (!result) return null
+        const result = await transport.fetchChatContentDelta(chaId, chatIndex, chatId, base, options)
+        if (!result || options?.signal?.aborted) return null
 
         let full: Chat = result.chat
         let fingerprints: string[]

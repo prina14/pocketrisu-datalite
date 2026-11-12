@@ -42,7 +42,7 @@
             pageSize: number; pageCount: number; freelistCount: number;
             reclaimable: number; journalMode: string; autoVacuum: number | string;
         }
-        chunks?: { count: number; bytes: number; orphanBytes: number; liveChunked: boolean }
+        chunks?: { count: number; bytes: number; orphanBytes: number | null; liveChunked: boolean }
         prefixes: Record<string, PrefixInfo>
         kvRows: number
         kvTotalBytes: number
@@ -55,6 +55,7 @@
         /** Deactivated-character rows the live database no longer references (kept until purged here). */
         archiveOrphan?: { count: number; totalSize: number; available: boolean }
         orphan: { count: number; totalSize: number; available: boolean }
+        detailed?: boolean
         etag: string | null
     }
     interface CharBreakdown {
@@ -157,12 +158,12 @@
     }
 
     // ── Fetch ────────────────────────────────────────────────────────────────
-    async function loadStats() {
+    async function loadStats(detailed = true) {
         loading = true
         loadError = null
         try {
             const auth = await forageStorage.createAuth()
-            const res = await fetch('/api/db/stats', { headers: { 'risu-auth': auth } })
+            const res = await fetch(detailed ? '/api/db/stats' : '/api/db/stats?scope=overview', { headers: { 'risu-auth': auth } })
             if (!res.ok) throw new Error(`HTTP ${res.status}`)
             stats = await res.json()
         } catch (err) {
@@ -474,13 +475,16 @@
         alertMd(`### ${label}\n\n${fmtBytes(size)}\n\n${desc}`)
     }
 
-    $effect(() => { loadStats() })
+    $effect(() => { void loadStats(false) })
 </script>
 
 <p class="text-textcolor2 text-sm mb-4">{language.storageDashboardDesc}</p>
 
-<div class="flex justify-end mb-3">
-    <ShButton variant="outline" size="default" onclick={loadStats} disabled={loading}>
+<div class="flex justify-end gap-2 mb-3">
+    <ShButton variant="outline" size="default" onclick={() => loadStats(true)} disabled={loading}>
+        {language.storageDetailedScan}
+    </ShButton>
+    <ShButton variant="outline" size="default" onclick={() => loadStats(false)} disabled={loading}>
         <RefreshCwIcon size={16} class={loading ? 'animate-spin' : ''} />
         <span class="hidden sm:inline">{loading ? language.storageLoading : language.storageRefresh}</span>
     </ShButton>
@@ -814,7 +818,7 @@
         {#if !stats.orphan.available}
             <ShAlert variant="default">
                 {#snippet icon()}<InfoIcon />{/snippet}
-                {language.storageOrphanUnavailable}
+                {stats.detailed === false ? language.storageDetailedScanHint : language.storageOrphanUnavailable}
             </ShAlert>
         {/if}
 
@@ -826,7 +830,7 @@
             <ShSwitch bind:checked={DBState.db.nodeOnlyAutoCleanAssets} />
         </div>
 
-        {#if stats.archiveOrphan}
+        {#if stats.archiveOrphan?.available}
             <div class="flex items-center justify-between gap-3 mb-3 border-t border-darkborderc/50 pt-3">
                 <div class="min-w-0">
                     <div class="text-textcolor text-sm">{language.storageArchiveOrphanHeader(stats.archiveOrphan.count, stats.archiveOrphan.totalSize)}</div>

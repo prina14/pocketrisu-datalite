@@ -2291,6 +2291,8 @@ export const languageKorean = {
   systemDashboard: "대시보드",
   storageDashboardDesc:
     "스토리지 사용량을 확인하고, 큰 항목을 찾고, 공간을 회수합니다.",
+    storageDetailedScan: "정리 대상 검사",
+    storageDetailedScanHint: "미사용 미디어와 청크를 확인하려면 정리 대상 검사를 실행하세요.",
   storageRefresh: "새로고침",
   storageLoading: "불러오는 중...",
   storageFailedLoad: "스토리지 통계를 불러오지 못했습니다",

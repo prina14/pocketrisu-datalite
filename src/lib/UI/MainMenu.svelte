@@ -13,6 +13,7 @@
     import { openSettings, SettingsRoute } from "src/ts/routing";
     import ShButton from "./GUI/ShButton.svelte";
     import LazyBoundary from './LazyBoundary.svelte';
+    import RecentCharacters from './RecentCharacters.svelte';
 
     const loadRealmBrowser = () => import('./Realm/RealmBrowser.svelte');
     const loadRecommendations = () => import('./Realm/RealmRecommendations.svelte');
@@ -111,6 +112,7 @@
         </div>
       {/if}
       <div class="mt-4 mb-4 w-full border-t border-t-selected"></div>
+      <RecentCharacters />
       <div class="flex items-center gap-2">
         <button
           type="button"

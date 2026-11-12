@@ -6935,16 +6935,17 @@ function chatPrefixMatches(chat, base) {
 }
 
 function sendChatContent(req, res, chat) {
-    // The body depends on the base headers, so a cached response must never
-    // be reused for a request with different ones.
-    res.setHeader('Vary', 'x-chat-base-count, x-chat-base-fp');
+    res.setHeader('Vary', 'x-chat-base-count, x-chat-base-fp, x-chat-prefetch');
     res.setHeader('Content-Type', 'application/octet-stream');
     const base = readChatDeltaBase(req);
-    if (base && chatPrefixMatches(chat, base)) {
-        res.setHeader('x-chat-delta-base', String(base.count));
-        return res.send(Buffer.from(encodeRisuSaveLegacy({ ...chat, message: chat.message.slice(base.count) })));
+    const delta = base && chatPrefixMatches(chat, base);
+    const payload = Buffer.from(encodeRisuSaveLegacy(delta ? { ...chat, message: chat.message.slice(base.count) } : chat));
+    // Background preparation must never pull an unbounded conversation body.
+    if (req.headers['x-chat-prefetch'] === '1' && payload.length > 2 * 1024 * 1024) {
+        return res.status(204).end();
     }
-    return res.send(Buffer.from(encodeRisuSaveLegacy(chat)));
+    if (delta) res.setHeader('x-chat-delta-base', String(base.count));
+    return res.send(payload);
 }
 
 app.get('/api/chat-content/:chaId/:chatIndex', async (req, res, next) => {
@@ -8489,6 +8490,7 @@ async function estimateServerBackupSize() {
 app.get('/api/db/stats', async (req, res, next) => {
     if (!await checkAuth(req, res)) return;
     try {
+        const overview = req.query.scope === 'overview';
         const saveDir = path.join(process.cwd(), 'save');
         const dbFilePath = path.join(saveDir, 'risuai.db');
         const walPath = dbFilePath + '-wal';
@@ -8521,6 +8523,11 @@ app.get('/api/db/stats', async (req, res, next) => {
             backupDisk = { ...bDisk, path: backupsDir, sameAsSaveDir };
         }
 
+        // Backup warnings need capacity and an estimate, not orphan/reference scans.
+        if (req.query.scope === 'backup') {
+            return res.json({ disk, backupDisk, estimatedBackupSize: await estimateServerBackupSize() });
+        }
+
         const pageSize = sqliteDb.pragma('page_size', { simple: true });
         const pageCount = sqliteDb.pragma('page_count', { simple: true });
         const freelistCount = sqliteDb.pragma('freelist_count', { simple: true });
@@ -8536,7 +8543,7 @@ app.get('/api/db/stats', async (req, res, next) => {
         const chunkStat = sqliteDb.prepare('SELECT COUNT(*) AS c, COALESCE(SUM(LENGTH(data)), 0) AS b FROM chunks').get();
         // Bytes the next gc() would reclaim (true orphans + chunks pinned only by
         // stale/raw-overwritten manifests) — drives the Optimize button.
-        const orphanChunkBytes = reclaimableChunkBytes();
+        const orphanChunkBytes = overview ? null : reclaimableChunkBytes();
         const liveChunked = isDbBlobChunked();
 
         // Prefix breakdown — split database/ into the live blob vs rotated backups.
@@ -8594,7 +8601,7 @@ app.get('/api/db/stats', async (req, res, next) => {
         let orphan = { count: 0, totalSize: 0, available: false };
         let archiveOrphan = { count: 0, totalSize: 0, available: false };
         const stripped = dbCache[DB_HEX_KEY];
-        if (stripped && Array.isArray(stripped.characters)) {
+        if (!overview && stripped && Array.isArray(stripped.characters)) {
             try {
                 const rows = listOrphanArchiveRows(stripped);
                 archiveOrphan = { count: rows.payloads.length, totalSize: rows.bytes, available: true };
@@ -8618,7 +8625,7 @@ app.get('/api/db/stats', async (req, res, next) => {
         // walker alone misses every lazy character/module asset — union the
         // live manifests exactly like the purge path does, or the dashboard
         // reports the whole library as orphaned while purge deletes nothing.
-        if (stripped && Array.isArray(stripped.characters)) {
+        if (!overview && stripped && Array.isArray(stripped.characters)) {
             try {
                 const uncleanable = buildUncleanableSet(stripped);
                 addLiveManifestRefs(uncleanable, stripped);
@@ -8661,6 +8668,7 @@ app.get('/api/db/stats', async (req, res, next) => {
             trashed,
             orphan,
             archiveOrphan,
+            detailed: !overview,
             etag: dbEtag,
         });
     } catch (err) { next(err); }

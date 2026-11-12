@@ -35,7 +35,7 @@
     import ServerActivityNotice from './lib/Others/ServerActivityNotice.svelte';
     import LazyBoundary from './lib/UI/LazyBoundary.svelte';
 
-    const loadSettings = () => import('./lib/Setting/Settings.svelte');
+    import { loadSettings } from './ts/settingsLoader';
     const loadModelProfileBrowser = () => import('./lib/Setting/modelProfileBrowser.svelte');
     const loadHypaV3Modal = () => import('./lib/Others/HypaV3Modal.svelte');
     const loadRealmPopUp = () => import('./lib/UI/Realm/RealmPopUp.svelte');

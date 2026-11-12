@@ -35,6 +35,35 @@ function memoryCopies(): ChatCopyStore & { map: Map<string, any> } {
 
 const settle = () => new Promise((r) => setTimeout(r, 0))
 
+describe('background chat preparation', () => {
+    test('warms the persistent copy so the next foreground opening uses a verified delta', async () => {
+        const server = fakeServer(chatOf(50))
+        const copies = memoryCopies()
+        const transport = { ...server.transport, fetchChatContentDelta: vi.fn(server.transport.fetchChatContentDelta) }
+        const sync = createChatDeltaSync(transport, copies)
+        const signal = new AbortController().signal
+        await sync.fetchChat('char', 0, 'chat', { signal, prefetch: true })
+        const opened = await sync.fetchChat('char', 0, 'chat')
+        expect(opened?.message).toHaveLength(50)
+        expect(transport.fetchChatContentDelta.mock.calls[0][4]).toEqual({ signal, prefetch: true })
+        expect(transport.fetchChatContentDelta.mock.calls[1][3]?.count).toBe(50)
+    })
+
+    test('a canceled speculative response cannot replace a cached conversation', async () => {
+        const copies = memoryCopies()
+        const controller = new AbortController()
+        const server = fakeServer(chatOf(5))
+        const transport = { ...server.transport, fetchChatContentDelta: vi.fn(async () => {
+            controller.abort()
+            return { chat: chatOf(5), deltaBase: null }
+        }) }
+        const result = await createChatDeltaSync(transport, copies).fetchChat('char', 0, 'chat', { signal: controller.signal, prefetch: true })
+        await settle()
+        expect(result).toBeNull()
+        expect(copies.map.size).toBe(0)
+    })
+})
+
 describe('chat delta sync — loading', () => {
     test('an unchanged 20,000-message reopening reuses the validated body without another snapshot or cache write', async () => {
         const server = fakeServer(chatOf(20_000))

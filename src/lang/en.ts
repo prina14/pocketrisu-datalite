@@ -2106,6 +2106,8 @@ export const languageEnglish = {
     // Storage dashboard
     systemDashboard: "Dashboard",
     storageDashboardDesc: "Inspect storage usage, find large items, and reclaim space.",
+    storageDetailedScan: "Scan cleanup candidates",
+    storageDetailedScanHint: "Run the cleanup scan to check unused media and chunks.",
     storageRefresh: "Refresh",
     storageLoading: "Loading...",
     storageFailedLoad: "Failed to load storage stats",

@@ -10,7 +10,8 @@
     import { DBState } from 'src/ts/stores.svelte';
     import LazyBoundary from '../UI/LazyBoundary.svelte';
 
-    const loadSettings = () => import('../Setting/Settings.svelte');
+    import { loadSettings } from 'src/ts/settingsLoader';
+    import RecentCharacters from '../UI/RecentCharacters.svelte';
     const loadRealmBrowser = () => import('../UI/Realm/RealmBrowser.svelte');
     const loadCharConfig = () => import('../SideBars/CharConfig.svelte');
     const loadDevTool = () => import('../SideBars/DevTool.svelte');
@@ -60,6 +61,7 @@
             {#snippet children(RealmBrowser)}<RealmBrowser />{/snippet}
         </LazyBoundary>
     {:else if $MobileGUIStack === 1}
+        <div class="px-3"><RecentCharacters /></div>
         <CharacterManager inline externalSearch={$MobileSearch} />
     {:else if $MobileGUIStack === 2}
         <LazyBoundary load={loadSettings} close={() => { $MobileGUIStack = 1; }}>

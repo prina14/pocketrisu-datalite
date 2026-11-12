@@ -15,13 +15,14 @@ import { computeKeyPassword, generateKeySalt, getSrp } from '@protontech/crypto/
 import { fetchViaProxy2 } from '../globalApi.svelte'
 import { nodeOnlyVer } from '../storage/database.svelte'
 import { anySignal, setSdkAbortError } from './protonImport'
+import { protonAppVersion } from './protonAppVersion'
 
 Api.init({})
 CryptoProxy.setEndpoint(new Api())
 setSdkAbortError(AbortError)
 
 // Proton asks third-party clients to identify themselves honestly.
-const APP_VERSION = `external-drive-pocketrisu@${nodeOnlyVer}-stable`
+const APP_VERSION = protonAppVersion(nodeOnlyVer)
 
 // drive-api.proton.me only allows CORS from localhost and private IPs, so
 // remote access (Tailscale, custom domains) must go through the server relay.

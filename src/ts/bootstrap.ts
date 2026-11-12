@@ -281,6 +281,7 @@ export async function loadData() {
                 requestStoragePersistence,
                 checkRisuUpdate,
                 fetchPublicStats,
+                () => { void import('./warmNavigation').then(({ warmNavigation }) => warmNavigation()).catch(() => {}) },
             ])
             // Server-side model-job recovery (jobRecovery.ts): slot journaled
             // responses from disconnected generations back into their chats.
@@ -342,7 +343,7 @@ async function maybeRunBootBackupReminder(enabled: Promise<boolean>) {
     let total: number | null = null
     try {
         const auth = await forageStorage.createAuth()
-        const res = await fetchWithTimeout('/api/db/stats', { headers: { 'risu-auth': auth } })
+        const res = await fetchWithTimeout('/api/db/stats?scope=backup', { headers: { 'risu-auth': auth } })
         if (res.ok) {
             const stats = await res.json()
             if (typeof stats?.estimatedBackupSize === 'number') estimate = stats.estimatedBackupSize
