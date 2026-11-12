@@ -125,6 +125,8 @@ const stmtKvDelPrefix = db.prepare(`DELETE FROM kv WHERE key LIKE ? ESCAPE '\\'`
 // also the intended match.
 const stmtKvRange = db.prepare(`SELECT key FROM kv WHERE key >= ? AND key < ?`);
 const stmtKvRangeSizes = db.prepare(`SELECT key, LENGTH(value) as size FROM kv WHERE key >= ? AND key < ?`);
+const stmtKvRangeStats = db.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(LENGTH(value)), 0) AS totalSize FROM kv WHERE key >= ? AND key < ?`);
+const stmtKvPrefixStats = db.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(LENGTH(value)), 0) AS totalSize FROM kv WHERE key LIKE ? ESCAPE '\\'`);
 const stmtKvDelRange = db.prepare(`DELETE FROM kv WHERE key >= ? AND key < ?`);
 const stmtKvUpdatedAt = db.prepare(`SELECT updated_at FROM kv WHERE key = ?`);
 
@@ -207,6 +209,13 @@ function kvListWithSizes(prefix) {
     return rows.map(r => ({ key: r.key, size: r.size }));
 }
 
+// Numeric summaries do not need thousands of key strings and row objects in
+// Node. Keep the exact same prefix boundaries as the list-based read.
+function kvPrefixStats(prefix) {
+    const range = prefixRange(prefix);
+    return range ? stmtKvRangeStats.get(...range) : stmtKvPrefixStats.get(likePrefix(prefix));
+}
+
 function checkpointWal(mode = 'TRUNCATE') {
     return db.pragma(`wal_checkpoint(${mode})`);
 }
@@ -250,7 +259,7 @@ module.exports = {
     db,
     memoryProfile,
     // KV
-    kvGet, kvSet, kvDel, kvList, kvDelPrefix, kvListWithSizes, kvSize, kvGetUpdatedAt, kvCopyValue,
+    kvGet, kvSet, kvDel, kvList, kvDelPrefix, kvListWithSizes, kvPrefixStats, kvSize, kvGetUpdatedAt, kvCopyValue,
     kvGetReadRevision,
     clearEntities,
     checkpointWal,

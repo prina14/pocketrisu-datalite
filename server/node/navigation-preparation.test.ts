@@ -44,15 +44,17 @@ test('dashboard overview leaves unscanned cleanup results unavailable', async ()
     let handler: any
     const json = vi.fn(), next = vi.fn()
     const scan = vi.fn(() => { throw Error('unexpected reference scan') })
+    const estimate = vi.fn(async () => 99), inlays = vi.fn(async () => 17)
+    const prefixStats = vi.fn(() => ({ count: 2, totalSize: 30 }))
     vm.runInNewContext(source.slice(start, end), {
         app: { get: (_: string, callback: any) => { handler = callback } },
         checkAuth: async () => true, path, process, statSafe: () => ({ size: 10 }),
         diskFreeStat: async () => ({ free: 123, total: 456 }), backupsDir: '/backups', DEFAULT_BACKUPS_DIR: '/backups',
-        estimateServerBackupSize: async () => 99, sumInlayFsBytes: async () => 0,
+        estimateServerBackupSize: estimate, sumInlayFsBytes: inlays,
         sqliteDb: { pragma: () => 0, prepare: () => ({ get: () => ({ c: 0, b: 0, s: 0 }) }) },
-        DB_BLOB_KEY: 'database/database.bin', DB_BACKUP_PREFIX: 'database/dbbackup-', ASSET_PREFIXES: [],
+        DB_BLOB_KEY: 'database/database.bin', DB_BACKUP_PREFIX: 'database/dbbackup-', ASSET_PREFIXES: ['assets/', 'inlay_meta/', 'archive/'], ARCHIVE_PREFIX: 'archive/',
         DB_HEX_KEY: 'db', dbCache: { db: { characters: [] } }, dbEtag: 'fixture',
-        kvSize: () => 0, kvList: () => [], snapshotPluginSizer: () => () => ({ bytes: 0 }),
+        kvSize: () => 0, kvList: () => [], kvPrefixStats: prefixStats, snapshotPluginSizer: () => () => ({ bytes: 0 }),
         isDbBlobChunked: () => true, archivedStubsOf: () => [], fs: { readdir: async () => [] },
         reclaimableChunkBytes: scan, listOrphanArchiveRows: scan, buildUncleanableSet: scan,
         logger: { warn: scan },
@@ -60,6 +62,9 @@ test('dashboard overview leaves unscanned cleanup results unavailable', async ()
     await handler({ query: { scope: 'overview' } }, { json }, next)
     expect(next).not.toHaveBeenCalled()
     expect(scan).not.toHaveBeenCalled()
+    expect(inlays).toHaveBeenCalledOnce()
+    expect(prefixStats).toHaveBeenCalledTimes(2)
+    expect(estimate).toHaveBeenCalledWith({ dbBlobSize: 0, assetsBytes: 30, inlayMetaBytes: 30, archiveBytes: 0, inlayFsBytes: 17 })
     expect(json.mock.calls[0][0]).toMatchObject({
         detailed: false, chunks: { orphanBytes: null },
         orphan: { available: false }, archiveOrphan: { available: false },

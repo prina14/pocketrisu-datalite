@@ -35,7 +35,7 @@ const getVips = () => {
     return _vipsPromise
 }
 const { kvGet, kvSet, kvDel, kvList,
-        kvDelPrefix, kvListWithSizes, kvSize, kvGetUpdatedAt, kvGetReadRevision, kvCopyValue, clearEntities, checkpointWal,
+        kvDelPrefix, kvListWithSizes, kvPrefixStats, kvSize, kvGetUpdatedAt, kvGetReadRevision, kvCopyValue, clearEntities, checkpointWal,
         gcChunks, reclaimableChunkBytes, isDbBlobChunked, snapshotFootprint, memoryProfile, db: sqliteDb } = require('./db.cjs');
 const {
     addLogBatch, queryLogs, clearLogs, countLogs,
@@ -8476,19 +8476,20 @@ async function sumInlayFsBytes() {
 // /api/backup/server/save without writing anything. Inlay files live on the
 // filesystem (post-migration), so we have to fs.stat them rather than read
 // kvSize. Cost: ~5-50 ms typical, ~200 ms for users with thousands of inlays.
-async function estimateServerBackupSize() {
+async function estimateServerBackupSize(known = {}) {
     let total = 0;
-    total += kvSize(DB_BLOB_KEY) || 0;
+    total += known.dbBlobSize ?? (kvSize(DB_BLOB_KEY) || 0);
     // Plugin storage is re-embedded into database.risudat on export.
     for (const it of pluginStorage.list()) total += it.size;
-    for (const it of kvListWithSizes('assets/')) total += it.size;
-    for (const it of kvListWithSizes('inlay_meta/')) total += it.size;
+    total += known.assetsBytes ?? kvPrefixStats('assets/').totalSize;
+    total += known.inlayMetaBytes ?? kvPrefixStats('inlay_meta/').totalSize;
     for (const e of listColdStorageBackupEntries()) total += e.size;
     // Deactivated characters are inlined into database.risudat on export.
     // Counting every archive row (orphans included) over-estimates, which is
     // the safe direction for a free-space preflight.
-    for (const k of kvList(ARCHIVE_PREFIX)) total += kvSize(k) || 0;
-    total += await sumInlayFsBytes();
+    if (known.archiveBytes !== undefined) total += known.archiveBytes;
+    else for (const k of kvList(ARCHIVE_PREFIX)) total += kvSize(k) || 0;
+    total += known.inlayFsBytes ?? await sumInlayFsBytes();
     return total;
 }
 
@@ -8496,6 +8497,12 @@ app.get('/api/db/stats', async (req, res, next) => {
     if (!await checkAuth(req, res)) return;
     try {
         const overview = req.query.scope === 'overview';
+        let phaseStarted = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        const phase = (name) => {
+            const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+            if (!res.headersSent) res.append?.('Server-Timing', `stats-${name};dur=${(now - phaseStarted).toFixed(2)}`);
+            phaseStarted = now;
+        };
         const saveDir = path.join(process.cwd(), 'save');
         const dbFilePath = path.join(saveDir, 'risuai.db');
         const walPath = dbFilePath + '-wal';
@@ -8528,9 +8535,12 @@ app.get('/api/db/stats', async (req, res, next) => {
             backupDisk = { ...bDisk, path: backupsDir, sameAsSaveDir };
         }
 
+        phase('disk');
         // Backup warnings need capacity and an estimate, not orphan/reference scans.
         if (req.query.scope === 'backup') {
-            return res.json({ disk, backupDisk, estimatedBackupSize: await estimateServerBackupSize() });
+            const estimatedBackupSize = await estimateServerBackupSize();
+            phase('backup-estimate');
+            return res.json({ disk, backupDisk, estimatedBackupSize });
         }
 
         const pageSize = sqliteDb.pragma('page_size', { simple: true });
@@ -8542,6 +8552,7 @@ app.get('/api/db/stats', async (req, res, next) => {
 
         const dbBlobSize = kvSize(DB_BLOB_KEY) || 0;
 
+        phase('database-meta');
         // Physical storage of the chunked DB blob (and all snapshots, which share
         // chunks). This is where the blob bytes actually live post-chunking — kv
         // holds only a tiny marker, so the chart must count this table separately.
@@ -8550,6 +8561,7 @@ app.get('/api/db/stats', async (req, res, next) => {
         // stale/raw-overwritten manifests) — drives the Optimize button.
         const orphanChunkBytes = overview ? null : reclaimableChunkBytes();
         const liveChunked = isDbBlobChunked();
+        phase('chunks');
 
         // Prefix breakdown — split database/ into the live blob vs rotated backups.
         const prefixes = {};
@@ -8569,6 +8581,7 @@ app.get('/api/db/stats', async (req, res, next) => {
             }
         }
         prefixes[DB_BACKUP_PREFIX] = { totalSize: backupTotal, count: backupKeys.length };
+        phase('snapshots');
         for (const p of ASSET_PREFIXES) {
             if (p === ARCHIVE_PREFIX) {
                 // Chunk-routed rows hold only a marker in kv; report logical size.
@@ -8578,15 +8591,14 @@ app.get('/api/db/stats', async (req, res, next) => {
                 prefixes[p] = { totalSize: total, count: keys.length };
                 continue;
             }
-            const items = kvListWithSizes(p);
-            let total = 0;
-            for (const it of items) total += it.size;
-            prefixes[p] = { totalSize: total, count: items.length };
+            prefixes[p] = kvPrefixStats(p);
         }
 
+        phase('prefixes');
         const kvRows = sqliteDb.prepare('SELECT COUNT(*) AS c FROM kv').get().c;
         const kvTotalBytes = sqliteDb.prepare('SELECT COALESCE(SUM(LENGTH(value)), 0) AS s FROM kv').get().s;
 
+        phase('kv-summary');
         let fileBackups = { count: 0, totalSize: 0, oldest: null, newest: null };
         try {
             const entries = await fs.readdir(backupsDir, { withFileTypes: true });
@@ -8601,6 +8613,7 @@ app.get('/api/db/stats', async (req, res, next) => {
             }
         } catch { /* backups dir may not exist */ }
 
+        phase('backup-files');
         // Quick estimates from in-memory cache only — never decode the BLOB just for stats.
         let trashed = { count: 0, available: false };
         let orphan = { count: 0, totalSize: 0, available: false };
@@ -8649,11 +8662,19 @@ app.get('/api/db/stats', async (req, res, next) => {
             }
         }
 
-        const estimatedBackupSize = await estimateServerBackupSize();
+        phase('cleanup-candidates');
         // Inlay payload now lives on the filesystem (post-migration) rather
         // than in kv `inlay/*` prefixes. Surface explicitly so the dashboard
         // chart can include it in the inlay slice instead of underreporting.
         const inlayFsBytes = await sumInlayFsBytes();
+        phase('inlays');
+        // Reuse this request's aggregates; no TTL or cross-request stale cache.
+        const estimatedBackupSize = await estimateServerBackupSize({
+            dbBlobSize, assetsBytes: prefixes['assets/']?.totalSize,
+            inlayMetaBytes: prefixes['inlay_meta/']?.totalSize,
+            archiveBytes: prefixes[ARCHIVE_PREFIX]?.totalSize, inlayFsBytes,
+        });
+        phase('backup-estimate');
 
         res.json({
             files,
