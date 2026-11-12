@@ -17,6 +17,7 @@
 //             prefix, so it never shows up in the viewer's idb listing)
 
 import { getDatabase } from "../storage/database.svelte";
+import { recordSyncDiagnostic } from "../storage/syncDiagnostics";
 import {
     listPersistentKeys,
     makeEncodedStorageKey,
@@ -30,6 +31,7 @@ import {
 export type PluginStorageBackend = "save" | "local" | "idb";
 export interface PluginOwnerRecord {
     plugin: string;
+    // Time the attribution changed, not the value's last write time.
     updatedAt: number;
 }
 
@@ -54,13 +56,18 @@ function writeLocalMeta(map: Record<string, PluginOwnerRecord>): void {
 // ── write side (called from V3 storage wrappers) ────────────────────────────
 export function recordOwner(backend: PluginStorageBackend, key: string, plugin: string): void | Promise<void> {
     if (!plugin) return;
-    const record: PluginOwnerRecord = { plugin, updatedAt: Date.now() };
     if (backend === "save") {
         const db = getDatabase();
+        // Values already live in the server KV. Repeating a write by the same
+        // owner must not dirty the main DB just to refresh a sidecar timestamp.
+        const changed = db.pluginStorageMeta?.[key]?.plugin !== plugin;
+        recordSyncDiagnostic('plugin-storage-owner', { plugin: plugin.slice(0, 100), backend, changed });
+        if (!changed) return;
         db.pluginStorageMeta ??= {};
-        db.pluginStorageMeta[key] = record;
+        db.pluginStorageMeta[key] = { plugin, updatedAt: Date.now() };
         return;
     }
+    const record: PluginOwnerRecord = { plugin, updatedAt: Date.now() };
     if (backend === "local") {
         const map = readLocalMeta();
         map[key] = record;
@@ -125,3 +132,4 @@ export async function getOwners(backend: PluginStorageBackend): Promise<Record<s
     }
     return out;
 }
+
