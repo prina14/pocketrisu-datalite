@@ -32,6 +32,31 @@ beforeEach(() => {
 })
 
 describe('validated boot copies', () => {
+    test('a prepared delta in the version probe completes the read without uploading a manifest', async () => {
+        const old = randomBytes(300000)
+        const next = Buffer.concat([old.subarray(0, 12345), Buffer.from('changed'), old.subarray(12345)])
+        const hash = (value: Uint8Array) => createHash('sha256').update(value).digest('hex')
+        const manifest = makeManifest(old, hash)
+        copies.set('db:database/database.bin', { etag: 'old', revision: 'r1', data: old, manifest })
+        const fetcher = vi.fn().mockResolvedValue(new Response(makeDelta(next, manifest, hash), {
+            headers: { 'x-read-delta': '1', 'x-read-prepared-delta': 'probe-hit', 'x-db-etag': 'new', 'x-read-revision': 'r2' },
+        }))
+        const s = storage(fetcher)
+        expect(await s.getItem('database/database.bin')).toEqual(next)
+        expect(fetcher).toHaveBeenCalledOnce()
+        expect(fetcher.mock.calls[0][0]).toBe('/api/read')
+        expect(fetcher.mock.calls[0][1].headers.get('x-read-prepared-accept')).toBe('1')
+        expect(s._lastDbEtag).toBe('new')
+    })
+    test('a broken prepared probe packet still fetches a full authenticated value', async () => {
+        const old = randomBytes(200000)
+        copies.set('db:database/database.bin', { etag: 'old', revision: 'r1', data: old })
+        const fetcher = vi.fn().mockResolvedValueOnce(new Response(new Uint8Array([1]), { headers: { 'x-read-delta': '1' } }))
+            .mockResolvedValueOnce(new Response('safe full', { headers: { 'x-db-etag': 'full' } }))
+        expect((await storage(fetcher).getItem('database/database.bin')).toString()).toBe('safe full')
+        expect(fetcher).toHaveBeenCalledTimes(2)
+        expect(fetcher.mock.calls[1][1].headers.has('if-none-match')).toBe(false)
+    })
     test('an in-flight deferred copy cannot finish after and overwrite a newer immediate DB copy', async () => {
         const normalPut = vi.mocked(transferCache.put).getMockImplementation()!
         let release!: () => void

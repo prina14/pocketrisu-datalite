@@ -44,6 +44,9 @@ jobs:
         env:
           NODE_OPTIONS: '--max-old-space-size=4096'
 
+      - name: Verify precompressed application bytes
+        run: node scripts/precompress-assets.mjs --verify dist
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:

@@ -15,7 +15,7 @@ import { beginStartupPhase, measureStartupPhase } from '../startup'
 import { recordSyncDiagnostic } from './syncDiagnostics'
 import { readHashAsync } from './readDeltaHash'
 import { gzipSync } from 'fflate'
-import { MIN_DELTA_BYTES, makeManifestAsync, applyDeltaAsync } from '../../../server/node/readDelta.mjs'
+import { MIN_DELTA_BYTES, makeManifestAsync, applyDeltaAsync, validManifest } from '../../../server/node/readDelta.mjs'
 
 const AUTH_FETCH_TRANSIENT_MAX_RETRIES = 3
 const AUTH_FETCH_TRANSIENT_BASE_DELAY_MS = 500
@@ -330,10 +330,18 @@ export class NodeStorage{
 
     private persistDbCopy(copy: TransferCopyInput, startup = true): Promise<void> {
         const write = async () => {
+            // This runs with the deferred copy write, after the UI is ready.
+            // Keep the chunk index atomically beside the exact cached bytes so
+            // a later changed-version read does not hash the whole base again.
+            if (!copy.manifest && copy.data.length >= MIN_DELTA_BYTES) {
+                try { copy.manifest = (await makeManifestAsync(copy.data, readHashAsync) ?? undefined) as TransferCopyInput['manifest'] }
+                catch { /* Optional metadata; normal manifest generation remains available. */ }
+            }
             for (let attempt = 1; attempt <= 2; attempt++) {
                 try {
                     const put = transferCache.putChecked ?? transferCache.put
-                    await put.call(transferCache, copy.key, copy.etag, copy.data, copy.revision)
+                    if (copy.manifest) await put.call(transferCache, copy.key, copy.etag, copy.data, copy.revision, copy.manifest)
+                    else await put.call(transferCache, copy.key, copy.etag, copy.data, copy.revision)
                     recordSyncDiagnostic('cache-write-ok', { etag: copy.etag, bytes: copy.data.byteLength, attempt })
                     return
                 } catch (error) {
@@ -724,6 +732,7 @@ export class NodeStorage{
             method: 'GET', cache: 'no-store', headers: {
                 ...headers, 'if-none-match': version.etag,
                 'x-read-check-only': '1', 'if-read-revision': version.revision!,
+                ...(isDatabase ? { 'x-read-prepared-accept': '1' } : {}),
             },
         }))
         const copy = copyKey ? await measured('cache-read', () => transferCache.get(copyKey, isDatabase ? version => {
@@ -756,8 +765,11 @@ export class NodeStorage{
             // Errors are handled normally, never masked by a local copy.
             if (!probed.ok || !probed.headers.has('x-read-version-check')) da = probed
         }
+        const cachedManifest = copy?.manifest && copy.manifest.size === copy.data.length && validManifest(copy.manifest)
+            ? copy.manifest : null
         const manifest = !da && copy && copy.data.length >= MIN_DELTA_BYTES
-            ? await measured('delta-manifest', () => makeManifestAsync(copy.data, readHashAsync)) : null
+            ? cachedManifest ?? await measured('delta-manifest', () => makeManifestAsync(copy.data, readHashAsync)) : null
+        if (isDatabase && manifest) recordSyncDiagnostic('read-manifest', { reused: manifest === cachedManifest, background })
         if (!da && manifest) {
             const text = JSON.stringify(manifest)
             const deltaHeaders = { ...headers, 'content-type': 'application/json' }
@@ -788,7 +800,8 @@ export class NodeStorage{
             data = Buffer.from(await measured('response-body', () => da.arrayBuffer()))
             if (da.headers.get('x-read-delta') === '1') {
                 if (!copy) throw new Error('Missing read delta base')
-                data = await measured('delta-apply', async () => Buffer.from(await applyDeltaAsync(copy.data, data, readHashAsync, manifest)))
+                if (isDatabase) recordSyncDiagnostic('read-delta-response', { prepared: da.headers.get('x-read-prepared-delta'), background })
+                data = await measured('delta-apply', async () => Buffer.from(await applyDeltaAsync(copy.data, data, readHashAsync, manifest ?? cachedManifest)))
             }
         } catch (error) {
             if (da.headers.get('x-read-delta') !== '1') throw error

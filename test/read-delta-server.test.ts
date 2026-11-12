@@ -89,6 +89,49 @@ test('main DB changes reconstruct exactly, with the current writer-lock validato
     expect(packet.length).toBeLessThan(base.length * 0.05)
 })
 
+test('an authenticated version probe can return a prebuilt delta in one round trip; plain probes stay body-free', async () => {
+    const { srv, client } = await boot()
+    const { encodeRisuSaveLegacyBuffer } = await import('../server/node/utils.cjs')
+    const headers = { 'file-path': hex('database/database.bin'), 'accept-encoding': 'br' }
+    const extra = randomBytes(400000).toString('base64')
+    async function write(username: string) {
+        const response = await client.fetch('/api/write', { method: 'POST', headers: { ...headers, 'content-type': 'application/octet-stream' },
+            body: encodeRisuSaveLegacyBuffer({ characters: [], botPresets: [], personas: [], username, extra }) })
+        expect(response.status).toBe(200); await response.text()
+    }
+    await write('before')
+    const first = await client.fetch('/api/read', { headers })
+    const etag = first.headers.get('x-db-etag')!
+    const revision = first.headers.get('x-read-revision')!
+    const base = Buffer.from(await first.arrayBuffer())
+    await new Promise(resolve => setTimeout(resolve, 1700))
+    await write('after')
+    const probeHeaders = { ...headers, 'if-none-match': etag, 'if-read-revision': revision, 'x-read-check-only': '1' }
+    let prepared: Response | undefined
+    for (let i = 0; i < 40; i++) {
+        const response = await client.fetch('/api/read', { headers: { ...probeHeaders, 'x-read-prepared-accept': '1' } })
+        if (response.headers.get('x-read-prepared-delta') === 'probe-hit') { prepared = response; break }
+        await response.arrayBuffer()
+        await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    expect(prepared).toBeDefined()
+    expect(prepared!.headers.has('x-read-version-check')).toBe(false)
+    expect(prepared!.headers.get('cache-control')).toBe('private, no-store')
+    expect(prepared!.headers.get('content-encoding')).toBe('br')
+    const reconstructed = applyDelta(base, new Uint8Array(await prepared!.arrayBuffer()), hash)
+    const full = await client.fetch('/api/read', { headers })
+    expect(hash(reconstructed)).toBe(hash(new Uint8Array(await full.arrayBuffer())))
+    const plain = await client.fetch('/api/read', { headers: probeHeaders })
+    expect(plain.headers.get('x-read-version-check')).toBe('1')
+    expect((await plain.arrayBuffer()).byteLength).toBe(0)
+    const unknown = await client.fetch('/api/read', { headers: { ...probeHeaders, 'if-none-match': 'unknown', 'x-read-prepared-accept': '1' } })
+    expect(unknown.headers.get('x-read-version-check')).toBe('1')
+    await unknown.arrayBuffer()
+    const anonymous = await fetch(`http://127.0.0.1:${srv.port}/api/read`, { headers: { ...probeHeaders, 'x-read-prepared-accept': '1' } })
+    expect(anonymous.status).toBe(400)
+    expect(anonymous.headers.has('x-read-delta')).toBe(false); await anonymous.text()
+})
+
 test('authentication and manifest validation precede reading; unrelated values use full responses', async () => {
     const { srv, client } = await boot()
     const anonymous = await fetch(`http://127.0.0.1:${srv.port}/api/read-delta`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })

@@ -44,6 +44,7 @@ import {
     type TTSHookFn,
 } from "src/ts/process/ttsHooks";
 import isEqual from "lodash/isEqual";
+import { beginPluginInitialization, recordPluginWrite } from '../pluginDiagnostics';
 
 /*
     V3 API for RisuAI Plugins
@@ -828,6 +829,7 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
         },
         removeRisuChatListener: oldApis.removeRisuChatListener,
         setDatabaseLite: (newDb: any) => {
+            recordPluginWrite(plugin.name, 'setDatabaseLite', Object.keys(newDb ?? {}).filter(key => allowedDbKeys.includes(key)));
             if(newDb && Object.hasOwn(newDb, 'plugins')){
                 if(import.meta.env.DEV && !isEqual(newDb.plugins, $state.snapshot(DBState.db.plugins))){
                     console.warn(`Plugin "${plugin.name}" attempted to modify the plugin list using setDatabaseLite. The change was ignored.`);
@@ -840,7 +842,10 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
 
             return oldApis.setDatabaseLite(newDb);
         },
-        setDatabase: oldApis.setDatabase,
+        setDatabase: (newDb: any) => {
+            recordPluginWrite(plugin.name, 'setDatabase', Object.keys(newDb ?? {}).filter(key => allowedDbKeys.includes(key)));
+            return oldApis.setDatabase(newDb);
+        },
         loadPlugins: oldApis.loadPlugins,
         readImage: oldApis.readImage,
         readInlay: async (id: string) => {
@@ -967,6 +972,7 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
             const db = getDatabase();
             for (const p of db.plugins) {
                 if (p.name === plugin.name) {
+                    if (p.realArg[key] !== value) recordPluginWrite(plugin.name, 'setArgument', ['plugins']);
                     p.realArg[key] = value;
                 }
             }
@@ -1647,7 +1653,9 @@ export async function executePluginV3(plugin:RisuPlugin){
         name: plugin.name,
         host
     });
-    host.run(iframe, plugin.script);
+    const initialized = beginPluginInitialization(plugin.name, '3.0');
+    try { host.run(iframe, plugin.script, initialized); }
+    catch (error) { initialized(false); throw error; }
     console.log(`[RisuAI Plugin: ${plugin.name}] Loaded API V3 plugin.`);
 }
 

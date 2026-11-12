@@ -4,6 +4,7 @@ import wasm from "vite-plugin-wasm";
 import strip from '@rollup/plugin-strip';
 import tailwindcss from '@tailwindcss/vite'
 import { readFileSync } from 'fs';
+import { precompressedAssets } from './scripts/precompress-assets.mjs';
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf-8'));
 
@@ -14,6 +15,7 @@ export default defineConfig(({command, mode}) => {
       '__APP_VERSION__': JSON.stringify(pkg.version),
     },
     plugins: [
+      precompressedAssets(),
       {
         name: 'inline-startup-layout',
         transformIndexHtml(html) {

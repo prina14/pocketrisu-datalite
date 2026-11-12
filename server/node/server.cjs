@@ -14,6 +14,8 @@ const zlib = require('zlib')
 const { MIN_DELTA_BYTES, MAX_COPY_BYTES, validManifest, makeDelta } = require('./readDelta.mjs');
 const { compareReadDeltaGzip, compareReadDeltaBrotli, isSmallColdDatabaseDelta } = require('./read-delta-compression.cjs');
 const { createReadSnapshotCache, preferredReadEncoding, compressDeltaBytes } = require('./read-snapshot-cache.cjs');
+const { createPreparedReadDeltas } = require('./prepared-read-deltas.cjs');
+const { createPrecompressedAssets } = require('./precompressed-assets.cjs');
 const { startupPreview } = require('./startup-preview.cjs');
 const { createStartupLoopProbe } = require('./startup-loop-probe.cjs');
 const startupLoopProbe = createStartupLoopProbe();
@@ -99,6 +101,7 @@ let foregroundDatabaseReads = 0;
 const readViewTokens = new WeakMap();
 const databaseReadSnapshots = createReadSnapshotCache({ maxBytes: process.env.POCKETRISU_READ_SNAPSHOT_BYTES === undefined
     ? 64 * 1024 * 1024 : Number(process.env.POCKETRISU_READ_SNAPSHOT_BYTES) });
+const databaseReadDeltas = createPreparedReadDeltas();
 let databaseReadWarmTimer = null;
 function scheduleDatabaseReadWarm() {
     if (databaseReadWarmTimer) clearTimeout(databaseReadWarmTimer);
@@ -117,7 +120,11 @@ function scheduleDatabaseReadWarm() {
                 snapshot = databaseReadSnapshots.create(view, bytes, dbEtag);
             }
             persistStartupIndex(view, snapshot.etag);
-            return Promise.all([snapshot.getPreparedAsync(), snapshot.getGzip(), snapshot.getBrotli()]);
+            await Promise.all([snapshot.getPreparedAsync(), snapshot.getGzip(), snapshot.getBrotli()]);
+            if (databaseReadSnapshots.get(view, dbEtag) === snapshot) {
+                await databaseReadDeltas.warm(snapshot, () => foregroundDatabaseReads === 0 &&
+                    dbCache[DB_HEX_KEY] === view && databaseReadSnapshots.get(view, dbEtag) === snapshot);
+            }
         }).catch(error => logger.warn('[Read snapshot] Optional warmup failed:', error?.message || error));
     }, 1000);
     databaseReadWarmTimer.unref?.();
@@ -548,6 +555,7 @@ async function loadDbCacheIfMissing({ createBackup = false } = {}) {
 function invalidateDbCache() {
     persistedClientReadView = null;
     databaseReadSnapshots.clear();
+    databaseReadDeltas.clear();
     delete dbCache[DB_HEX_KEY];
     fullChatStore = null;
     pendingActivations.clear();
@@ -1403,6 +1411,7 @@ app.use(compression({
     filter: shouldCompress,
 }));
 // Vite 산출물은 해시 파일명이므로 /assets는 장기 캐시 안전
+app.use('/assets', createPrecompressedAssets(path.join(process.cwd(), 'dist/assets')));
 app.use('/assets', express.static(path.join(process.cwd(), 'dist/assets'), {
     maxAge: '1y',
     immutable: true,
@@ -4544,6 +4553,7 @@ async function readStorage(req, res, next) {
     // explicitly validated after authentication on every read.
     res.setHeader('Cache-Control', 'private, no-store');
     const deltaRead = req.method === 'POST';
+    let preparedProbeDelta = null;
     if (deltaRead && !validManifest(req.body)) return res.status(400).json({ error: 'Invalid read delta manifest' });
     const filePath = normalizeFilePathHeader(req.headers['file-path']);
     if (!filePath) {
@@ -4580,8 +4590,15 @@ async function readStorage(req, res, next) {
                 res.setHeader('x-read-index-validator', '1');
                 return res.status(304).end();
             }
-            // No blob reads, serialization or hash calculation in this path.
-            return res.status(200).end();
+            // Opt-in boot probes can consume an already completed delta in
+            // this same round trip. Plain diagnostics remain metadata-only.
+            const snapshot = isDb && databaseReadSnapshots.get(dbCache[filePath], dbEtag);
+            const prepared = req.headers['x-read-prepared-accept'] === '1' && snapshot
+                ? databaseReadDeltas.peek(snapshot, req.headers['if-none-match'], preferredReadEncoding(req)) : null;
+            if (!prepared) return res.status(200).end();
+            preparedProbeDelta = { snapshot, ...prepared };
+            res.removeHeader('x-read-version-check');
+            res.setHeader('x-read-transfer', 'full');
         }
         // Metadata probes distinguish pending edits from the persisted view,
         // so acknowledged patches invalidate them without forcing
@@ -4668,10 +4685,21 @@ async function readStorage(req, res, next) {
                 res.setHeader('Content-Encoding', encoding);
                 return res.send(bytes);
             };
+            // flushPendingDb and the immutable-snapshot identity check above
+            // still apply. A changed view falls back to a normal full read.
+            if (preparedProbeDelta?.snapshot === readSnapshot) {
+                res.setHeader('x-read-delta', '1');
+                res.setHeader('x-read-transfer', 'delta');
+                res.setHeader('x-read-prepared-delta', 'probe-hit');
+                recordPhase('read-prepared-delta');
+                return preparedProbeDelta.encoding === 'identity'
+                    ? res.send(preparedProbeDelta.bytes) : sendCompressed(preparedProbeDelta.bytes);
+            }
             if (deltaRead && value.length >= MIN_DELTA_BYTES && value.length <= MAX_COPY_BYTES) {
                 const hash = bytes => nodeCrypto.createHash('sha256').update(bytes).digest('hex');
-                const prepared = readSnapshot ? await readSnapshot.getPreparedAsync() : null;
-                const bytes = makeDelta(value, req.body, hash, prepared);
+                const cachedDelta = readSnapshot ? await databaseReadDeltas.get(readSnapshot, req.body) : null;
+                const bytes = cachedDelta?.packet ?? makeDelta(value, req.body, hash);
+                if (cachedDelta) res.setHeader('x-read-prepared-delta', cachedDelta.hit ? 'hit' : 'miss');
                 // makeDelta owns its output; this view stays valid during
                 // async compression without another full-size byte copy.
                 const packet = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -4686,11 +4714,11 @@ async function readStorage(req, res, next) {
                     // otherwise compare with an early-stopping stream.
                     if (readSnapshot?.brotli) {
                         compressedFull = readSnapshot.brotli;
-                        compressedDelta = await compressDeltaBytes(packet, encoding);
+                        compressedDelta = await (cachedDelta?.getCompressed(encoding) ?? compressDeltaBytes(packet, encoding));
                         useDelta = compressedDelta.length < compressedFull.length;
                         res.setHeader('x-read-compare-bytes', 0);
                     } else {
-                        compressedDelta = await compressDeltaBytes(packet, encoding);
+                        compressedDelta = await (cachedDelta?.getCompressed(encoding) ?? compressDeltaBytes(packet, encoding));
                         if (isDb && isSmallColdDatabaseDelta(packet, compressedDelta, value)) {
                             res.setHeader('x-read-compare-bytes', 0);
                             res.setHeader('x-read-compare-policy', 'small-cold-delta');
@@ -4705,11 +4733,11 @@ async function readStorage(req, res, next) {
                     // The full gzip often dwarfs the small delta. Stop as soon
                     // as that is proven; keep compression off the event loop.
                     if (readSnapshot?.compressed) {
-                        compressedDelta = await compressDeltaBytes(packet, encoding);
+                        compressedDelta = await (cachedDelta?.getCompressed(encoding) ?? compressDeltaBytes(packet, encoding));
                         useDelta = compressedDelta.length < readSnapshot.compressed.length;
                         res.setHeader('x-read-compare-bytes', 0);
                     } else {
-                        compressedDelta = await compressDeltaBytes(packet, encoding);
+                        compressedDelta = await (cachedDelta?.getCompressed(encoding) ?? compressDeltaBytes(packet, encoding));
                         if (isDb && isSmallColdDatabaseDelta(packet, compressedDelta, value)) {
                             res.setHeader('x-read-compare-bytes', 0);
                             res.setHeader('x-read-compare-policy', 'small-cold-delta');

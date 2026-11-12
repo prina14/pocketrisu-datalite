@@ -35,6 +35,17 @@ test('copies and their versions survive a page/module reload on the same origin'
     expect(await next.versions('plugin:')).toEqual([['memory', 'updated']])
 })
 
+test('chunk metadata is atomic with its exact base and removed when new bytes replace it', async () => {
+    const { transferCache: copies } = await import('./transferCache')
+    const manifest = { v: 1, size: 3, chunks: [[3, 'a'.repeat(64)] as [number, string]] }
+    await copies.putChecked!('db:database', 'old', new Uint8Array([1, 2, 3]), 'r1', manifest)
+    expect((await copies.get('db:database'))?.manifest).toEqual(manifest)
+    await copies.updateRevision('db:database', 'old', 'r2')
+    expect((await copies.get('db:database'))?.manifest).toEqual(manifest)
+    await copies.putChecked!('db:database', 'new', new Uint8Array([4, 5]), 'r3')
+    expect((await copies.get('db:database'))?.manifest).toBeUndefined()
+})
+
 test('unavailable IndexedDB does not prevent network-only operation', async () => {
     vi.stubGlobal('indexedDB', undefined)
     const { transferCache: copies } = await import('./transferCache')

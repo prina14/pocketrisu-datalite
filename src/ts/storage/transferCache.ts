@@ -1,15 +1,16 @@
 // Optional, origin-local copies. Never serve one without authenticating and
 // validating its version with the server first. IndexedDB also works on HTTP
 // IP addresses, where CacheStorage/crypto.subtle may be unavailable.
-export interface TransferCopy { key: string; etag: string; data: Uint8Array; usedAt: number; revision?: string }
+export interface TransferManifest { v: number; size: number; chunks: [number, string][] }
+export interface TransferCopy { key: string; etag: string; data: Uint8Array; usedAt: number; revision?: string; manifest?: TransferManifest }
 export type TransferCopyInput = Omit<TransferCopy, 'usedAt'>
 export type TransferVersion = Pick<TransferCopy, 'etag' | 'revision'>
 export interface TransferValidators { versions: [string, string][]; revisions: [string, string][] }
 export interface TransferCache {
     get(key: string, onVersion?: (version: TransferVersion) => void): Promise<TransferCopy | null>
-    put(key: string, etag: string, data: Uint8Array, revision?: string): Promise<void>
+    put(key: string, etag: string, data: Uint8Array, revision?: string, manifest?: TransferManifest): Promise<void>
     /** DB callers handle failure/retry explicitly; ordinary optional puts stay non-fatal. */
-    putChecked?(key: string, etag: string, data: Uint8Array, revision?: string): Promise<void>
+    putChecked?(key: string, etag: string, data: Uint8Array, revision?: string, manifest?: TransferManifest): Promise<void>
     putBatch?(copies: TransferCopyInput[]): Promise<void>
     updateRevision(key: string, etag: string, revision: string): Promise<void>
     versions(prefix: string, revisionsOnly?: boolean): Promise<[string, string][]>
@@ -58,11 +59,12 @@ async function writeBatch(copies: TransferCopyInput[]): Promise<void> {
         for (const copy of copies) {
             const usedAt = Date.now()
             store.put({ ...copy, usedAt })
-            meta.put({ key: copy.key, etag: copy.etag, revision: copy.revision, bytes: copy.data.byteLength, usedAt })
+            meta.put({ key: copy.key, etag: copy.etag, revision: copy.revision, bytes: copy.data.byteLength,
+                manifestBytes: copy.manifest ? JSON.stringify(copy.manifest).length * 2 : 0, usedAt })
         }
         // One size-only scan per bounded batch, not per plugin key. Values are
         // never read for eviction, and no sorting is needed below the cap.
-        const rows: { key: string; bytes: number; usedAt: number }[] = []
+        const rows: { key: string; bytes: number; manifestBytes?: number; usedAt: number }[] = []
         const req = meta.openCursor()
         let size = 0
         req.onsuccess = () => {
@@ -70,7 +72,7 @@ async function writeBatch(copies: TransferCopyInput[]): Promise<void> {
             if (cursor) {
                 const row = cursor.value
                 rows.push(row)
-                size += row.bytes
+                size += row.bytes + (row.manifestBytes || 0)
                 cursor.continue()
                 return
             }
@@ -80,7 +82,7 @@ async function writeBatch(copies: TransferCopyInput[]): Promise<void> {
                 if (protectedKeys.has(row.key)) continue
                 store.delete(row.key)
                 meta.delete(row.key)
-                size -= row.bytes
+                size -= row.bytes + (row.manifestBytes || 0)
             }
         }
         await finished
@@ -196,12 +198,12 @@ export const transferCache: TransferCache = {
             await finished
         } catch { /* optional cache */ }
     },
-    async put(key, etag, data, revision) {
-        await putCopies([{ key, etag, data, revision }])
+    async put(key, etag, data, revision, manifest) {
+        await putCopies([{ key, etag, data, revision, manifest }])
     },
-    async putChecked(key, etag, data, revision) {
+    async putChecked(key, etag, data, revision, manifest) {
         if (data.byteLength > MAX_BYTES) throw Object.assign(new Error('Copy exceeds the cache entry limit'), { name: 'CacheEntryTooLargeError' })
-        await writeBatch([{ key, etag, data, revision }])
+        await writeBatch([{ key, etag, data, revision, manifest }])
     },
     async putBatch(copies) { await putCopies(copies) },
 }

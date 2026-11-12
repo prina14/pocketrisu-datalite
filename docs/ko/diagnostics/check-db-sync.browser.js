@@ -84,7 +84,7 @@
             return counts;
         }, {});
         const report = {
-            '종류': 'pocketrisu-db-sync-check-v2',
+            '종류': 'pocketrisu-db-sync-check-v3',
             '서버revision관측중변경': new Set(samples.map(row => row['서버revision']).filter(Boolean)).size > 1,
             '확인결과': samples,
             '현재페이지저장요청수': writes,
@@ -92,12 +92,20 @@
                 .filter(entry => ['/api/patch', '/api/write', '/api/remove'].includes(new URL(entry.name).pathname))
                 .map(entry => ({ '요청': new URL(entry.name).pathname, '시작초': +(entry.startTime / 1000).toFixed(3), '완료초': +(entry.responseEnd / 1000).toFixed(3) })),
             '동기화추적': typeof globalThis.__pocketrisuSyncDiagnostics === 'function' ? globalThis.__pocketrisuSyncDiagnostics() : [],
+            '플러그인초기화': typeof globalThis.__pocketrisuPluginDiagnostics === 'function' ? globalThis.__pocketrisuPluginDiagnostics() : [],
+            'DB읽기타임라인': performance.getEntriesByType('resource')
+                .filter(entry => ['/api/read', '/api/read-delta', '/api/plugin-storage/index'].includes(new URL(entry.name).pathname))
+                .slice(-40).map(entry => ({
+                    '요청': new URL(entry.name).pathname, '시작초': +(entry.startTime / 1000).toFixed(3),
+                    '전체초': +(entry.duration / 1000).toFixed(3), '전송본문바이트': entry.encodedBodySize,
+                    '서버측정': entry.serverTiming?.map(timing => ({ '단계': timing.name, '소요ms': timing.duration })) ?? [],
+                })),
             '초기화단계': phases,
         };
         console.log(JSON.stringify(report, null, 2));
         return report;
     } catch (error) {
-        const report = { '종류': 'pocketrisu-db-sync-check-v2', '오류': error?.message ?? String(error), '확인결과': samples };
+        const report = { '종류': 'pocketrisu-db-sync-check-v3', '오류': error?.message ?? String(error), '확인결과': samples };
         console.log(JSON.stringify(report, null, 2));
         return report;
     }

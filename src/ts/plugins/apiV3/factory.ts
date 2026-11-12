@@ -7,7 +7,8 @@ type MsgType =
     | 'CALLBACK_RETURN'
     | 'RESPONSE'
     | 'RELEASE_INSTANCE'
-    | 'ABORT_SIGNAL';
+    | 'ABORT_SIGNAL'
+    | 'PLUGIN_INITIALIZED';
 
 interface RpcMessage {
     type: MsgType;
@@ -19,6 +20,7 @@ interface RpcMessage {
     result?: any;
     error?: string;
     abortId?: string;
+    success?: boolean;
 }
 
 interface RemoteRef {
@@ -813,7 +815,8 @@ export class SandboxHost {
         this.activeStreamCleanups.clear();
     }
 
-    public run(container: HTMLElement|HTMLIFrameElement, userCode: string) {
+    public run(container: HTMLElement|HTMLIFrameElement, userCode: string, onInitialized?: (success: boolean) => void) {
+        let initialized = false;
         if(container instanceof HTMLIFrameElement) {
             this.iframe = container;
         } else {
@@ -841,6 +844,11 @@ export class SandboxHost {
         const messageHandler = async (event: MessageEvent) => {
             if (event.source !== this.iframe.contentWindow) return;
             const data = event.data as RpcMessage;
+
+            if (data.type === 'PLUGIN_INITIALIZED') {
+                if (!initialized) { initialized = true; onInitialized?.(data.success === true); }
+                return;
+            }
 
 
             if (data.type === 'CALLBACK_RETURN') {
@@ -963,7 +971,13 @@ export class SandboxHost {
                     
                 (async () => {
                     ${userCode}
-                })()
+                })().then(
+                    () => window.parent.postMessage({ type: 'PLUGIN_INITIALIZED', success: true }, '*'),
+                    error => {
+                        window.parent.postMessage({ type: 'PLUGIN_INITIALIZED', success: false }, '*');
+                        throw error;
+                    }
+                )
             })();
         </script>
       </body>
