@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { recentCharacters } from './recentCharacters'
 
 describe('recent home characters', () => {
+    it('waits for character metadata without loading any conversations', () => {
+        expect(recentCharacters(undefined, {})).toEqual([])
+    })
     it('uses activity metadata, excludes trash and limits without mutating the database', () => {
         const characters = [
             { chaId: 'a', lastInteraction: 10 },

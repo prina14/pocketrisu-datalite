@@ -4,7 +4,7 @@ import { mount, tick, unmount } from 'svelte';
 import { get } from 'svelte/store';
 
 const fixtures = vi.hoisted(() => ({
-    db: { hideRealm: undefined as boolean | undefined, language: 'en', realmDirectOpen: true, nodeOnlyTransferSizeWarning: false },
+    db: { hideRealm: undefined as boolean | undefined, language: 'en', realmDirectOpen: true, nodeOnlyTransferSizeWarning: false, characters: [] },
     getHub: vi.fn(),
 }));
 vi.mock('src/ts/stores.svelte', async () => {
@@ -19,6 +19,8 @@ vi.mock('src/ts/alert', async () => {
 });
 vi.mock('src/ts/characterCards', () => ({ getRisuHub: fixtures.getHub, hubAdditionalHTML: '', hubURL: 'https://realm.example' }));
 vi.mock('src/ts/globalApi.svelte', () => ({ getVersionString: () => 'test', openURL: vi.fn() }));
+vi.mock('src/ts/characters', () => ({ changeChar: vi.fn(), getCharImage: vi.fn() }));
+vi.mock('src/ts/characterActivity', async () => ({ characterActivity: (await import('svelte/store')).writable({}) }));
 vi.mock('src/ts/update', async () => {
     const { writable } = await import('svelte/store');
     return { updateInfoStore: writable(null), updatePopupStore: writable(null) };

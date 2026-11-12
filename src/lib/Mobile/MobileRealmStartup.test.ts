@@ -4,6 +4,8 @@ import { mount, tick, unmount } from 'svelte';
 import { get } from 'svelte/store';
 
 const fixtures = vi.hoisted(() => ({ getHub: vi.fn() }));
+vi.mock('src/ts/characters', () => ({ changeChar: vi.fn(), getCharImage: vi.fn() }));
+vi.mock('src/ts/characterActivity', async () => ({ characterActivity: (await import('svelte/store')).writable({}) }));
 vi.mock('src/ts/process/modules', () => ({ moduleUpdate: vi.fn() }));
 vi.mock('src/ts/process/scripts', () => ({ resetScriptCache: vi.fn() }));
 vi.mock('src/ts/process/memory/memoryPresets', () => ({
