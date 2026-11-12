@@ -272,6 +272,39 @@ describe('snapshotValue — 조각 공유 스냅샷 (kvCopyValue 청크 인식)'
         expect(store.snapshotCost('rawsnap', 'live')).toBe(500)
         expect(store.snapshotCost('missing', 'live')).toBe(0)
     })
+
+    it('C6: marginal cost counts each unshared hash once, with empty or stale base manifests', () => {
+        const db = freshDb()
+        try {
+            const store = createChunkStore(db, T)
+            const bytes = randomBytes(300_000)
+            store.putValue('live', bytes)
+            store.snapshotValue('live', 'snap')
+            store.putValue('other', randomBytes(200_000))
+            store.putValue('raw', Buffer.alloc(47))
+            const first = db.prepare('SELECT hash FROM manifest_chunks WHERE manifest_key = ? ORDER BY seq LIMIT 1').get('snap') as { hash: string }
+            db.prepare('INSERT INTO manifest_chunks VALUES (?, ?, ?)').run('snap', 100_000, first.hash)
+            const hashes = (key: string) => new Set((db.prepare('SELECT hash FROM manifest_chunks WHERE manifest_key = ?').all(key) as { hash: string }[]).map(r => r.hash))
+            const oracle = (base: string) => {
+                const shared = hashes(base)
+                let total = 0
+                for (const hash of hashes('snap')) {
+                    if (!shared.has(hash)) total += (db.prepare('SELECT LENGTH(data) AS n FROM chunks WHERE hash = ?').get(hash) as { n: number }).n
+                }
+                return total
+            }
+            for (const base of ['live', 'other', 'raw', 'missing', 'snap']) {
+                expect(store.snapshotCost('snap', base)).toBe(oracle(base))
+            }
+            expect(store.snapshotCost('snap', 'missing')).toBe(bytes.length)
+            // A raw overwrite can leave a stale manifest until gc; preserve
+            // the established sizing semantics even in this repair state.
+            db.prepare('UPDATE kv SET value = ? WHERE key = ?').run(Buffer.alloc(3), 'live')
+            expect(store.snapshotCost('snap', 'live')).toBe(oracle('live'))
+            expect(store.snapshotCost('raw', 'live')).toBe(47)
+            expect(store.snapshotCost('missing', 'live')).toBe(0)
+        } finally { db.close() }
+    })
 })
 
 describe('gc — mark-sweep (참조 없는 조각만 삭제)', () => {

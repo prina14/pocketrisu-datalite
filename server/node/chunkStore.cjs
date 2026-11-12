@@ -78,10 +78,13 @@ function createChunkStore(db, opts = {}) {
     // Bytes of chunks referenced by `key` but NOT by `baseKey` — i.e. what `key`
     // uniquely keeps alive beyond the base. Used to size snapshots for the disk
     // limit by their real marginal cost, not their (shared) logical size.
+    // Subtract the hash sets before looking up chunk sizes; shared chunks
+    // should not incur a chunks-table lookup for every snapshot.
     const selMarginal = db.prepare(
         `SELECT COALESCE(SUM(LENGTH(c.data)), 0) AS n FROM chunks c
-         WHERE c.hash IN (SELECT hash FROM manifest_chunks WHERE manifest_key = ?)
-           AND c.hash NOT IN (SELECT hash FROM manifest_chunks WHERE manifest_key = ?)`,
+         WHERE c.hash IN (
+             SELECT hash FROM manifest_chunks WHERE manifest_key = ?
+             EXCEPT SELECT hash FROM manifest_chunks WHERE manifest_key = ?)`,
     );
     const copyManifest = db.prepare(
         'INSERT INTO manifest_chunks (manifest_key, seq, hash) SELECT ?, seq, hash FROM manifest_chunks WHERE manifest_key = ?',
