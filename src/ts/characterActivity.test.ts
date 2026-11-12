@@ -56,3 +56,43 @@ test('offline metadata stays local without starting an endless retry poll', asyn
     expect(request).toHaveBeenCalledTimes(calls)
     expect(JSON.parse(localStorage.getItem('pocketrisu-character-activity-v1')!).pending[0][0]).toBe('alice')
 })
+
+test('a negotiated POST snapshot replaces the follow-up GET and keeps other-device activity', async () => {
+    vi.resetModules(); vi.useFakeTimers(); vi.setSystemTime(10000); localStorage.clear()
+    const activity = await import('./characterActivity')
+    const request = vi.fn(async (_url: string, init?: RequestInit) => init?.method === 'POST'
+        ? Response.json({ entries: [{ chaId: 'alice', lastInteraction: 10001 }, { chaId: 'other', lastInteraction: 9000 }] },
+            { headers: { 'x-activity-snapshot': '1', etag: '"snapshot"' } })
+        : Response.json({ entries: [] }))
+    vi.stubGlobal('fetch', request)
+    activity.initCharacterActivity(async () => 'token'); await activity.syncCharacterActivity()
+    request.mockClear(); activity.recordCharacterOpen('alice'); await vi.advanceTimersByTimeAsync(250)
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(request.mock.calls[0][1]?.headers).toMatchObject({ 'x-activity-snapshot': '1' })
+    expect(get(activity.characterActivity)).toMatchObject({ alice: 10001, other: 9000 })
+    await activity.syncCharacterActivity()
+    expect(request.mock.calls[1][1]?.headers).toMatchObject({ 'if-none-match': '"snapshot"' })
+})
+
+test('snapshot acknowledgement cannot erase an open recorded while the POST was in flight', async () => {
+    vi.resetModules(); vi.useFakeTimers(); vi.setSystemTime(10000); localStorage.clear()
+    const activity = await import('./characterActivity')
+    let release!: (response: Response) => void
+    let posts = 0
+    const request = vi.fn(async (_url: string, init?: RequestInit) => {
+        if (init?.method !== 'POST') return Response.json({ entries: [] })
+        if (++posts === 1) return new Promise<Response>(resolve => { release = resolve })
+        return Response.json({ entries: [{ chaId: 'alice', lastInteraction: 20001 }] }, { headers: { 'x-activity-snapshot': '1' } })
+    })
+    vi.stubGlobal('fetch', request)
+    activity.initCharacterActivity(async () => 'token'); await activity.syncCharacterActivity()
+    activity.recordCharacterOpen('alice'); await vi.advanceTimersByTimeAsync(250)
+    const first = activity.syncCharacterActivity()
+    vi.setSystemTime(20000); activity.recordCharacterOpen('alice'); await vi.advanceTimersByTimeAsync(250)
+    release(Response.json({ entries: [{ chaId: 'alice', lastInteraction: 10001 }] }, { headers: { 'x-activity-snapshot': '1' } }))
+    await first
+    expect(get(activity.characterActivity).alice).toBe(20000)
+    await vi.advanceTimersByTimeAsync(250); await activity.syncCharacterActivity()
+    expect(posts).toBe(2)
+    expect(get(activity.characterActivity).alice).toBe(20001)
+})

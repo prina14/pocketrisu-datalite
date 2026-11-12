@@ -47,7 +47,18 @@ function createCharacterActivity(db, { kvSet, kvDel }) {
                 res.setHeader('Cache-Control', 'private, no-store');
                 const ids = req.body?.ids;
                 if (!Array.isArray(ids) || !ids.length || ids.length > 50 || !ids.every(validId)) return res.status(400).json({ error: 'Invalid activity IDs' });
-                try { res.json({ entries: record([...new Set(ids)]) }); }
+                try {
+                    const entries = record([...new Set(ids)]);
+                    // New clients otherwise immediately GET the same list.
+                    // Preserve the small acknowledgement for older clients.
+                    if (req.headers['x-activity-snapshot'] === '1') {
+                        const snapshot = read();
+                        res.setHeader('ETag', snapshot.etag);
+                        res.setHeader('x-activity-snapshot', '1');
+                        return res.type('json').send(snapshot.body);
+                    }
+                    res.json({ entries });
+                }
                 catch (error) { next(error); }
             });
         },
