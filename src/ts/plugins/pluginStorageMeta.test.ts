@@ -50,4 +50,3 @@ test('missing plugin names do not create metadata', () => {
     recordOwner('save', 'key', '')
     expect(state.db.pluginStorageMeta).toBeUndefined()
 })
-

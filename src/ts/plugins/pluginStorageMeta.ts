@@ -132,4 +132,3 @@ export async function getOwners(backend: PluginStorageBackend): Promise<Record<s
     }
     return out;
 }
-
