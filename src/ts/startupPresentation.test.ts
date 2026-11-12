@@ -16,7 +16,7 @@ test('stores appearance only and does not mutate the database or copy private co
     expect(JSON.stringify(db)).toBe(before)
     const host = document.createElement('section')
     applyStartupPresentation(host)
-    expect(host.style.getPropertyValue('--startup-sidebar-width')).toBe('512px')
+    expect(host.style.getPropertyValue('--startup-sidebar-width')).toBe('496px')
     expect(host.style.getPropertyValue('--risu-theme-darkborderc')).toBe('#123456')
     expect(host.style.getPropertyValue('--risu-font-family')).toBe('Times New Roman, serif')
     expect(host.dataset.startupRoundIcons).toBe('true')

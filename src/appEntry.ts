@@ -23,6 +23,13 @@ loadData()
 initHotkey()
 initScrollbarAutoHide()
 flushSync()
-document.getElementById('preloading')?.remove()
+// Hand off only after the mounted preview has had a rendering opportunity.
+// A timer also releases the overlay in hidden/throttled tabs.
+const removePreloading = () => document.getElementById('preloading')?.remove()
+const preloadingFallback = setTimeout(removePreloading, 100)
+requestAnimationFrame(() => {
+    clearTimeout(preloadingFallback)
+    removePreloading()
+})
 
 export default app;

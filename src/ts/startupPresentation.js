@@ -3,6 +3,10 @@
 /** @param {HTMLElement | null} host @param {string} [language] */
 export function applyStartupPresentation(host, language) {
     if (!host) return;
+    host.querySelectorAll('[data-startup-version]').forEach(node => {
+        const version = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0';
+        node.textContent = `v${version}`;
+    });
     let profile = null;
     try {
         const raw = localStorage.getItem('pocketrisu-startup-presentation-v1');
@@ -32,7 +36,7 @@ export function applyStartupPresentation(host, language) {
     } catch { /* public labels remain usable in the default language */ }
     if (!profile) return;
     if (Number.isInteger(profile.sidebarSize) && profile.sidebarSize >= 0 && profile.sidebarSize <= 3) {
-        host.style.setProperty('--startup-sidebar-width', `${384 + 64 * profile.sidebarSize}px`);
+        host.style.setProperty('--startup-sidebar-width', `${384 + 56 * profile.sidebarSize}px`);
     }
     host.dataset.startupRoundIcons = profile.roundIcons === true ? 'true' : 'false';
     for (const key of ['bgcolor', 'darkbg', 'borderc', 'selected', 'textcolor', 'textcolor2', 'darkborderc', 'darkbutton', 'primary']) {

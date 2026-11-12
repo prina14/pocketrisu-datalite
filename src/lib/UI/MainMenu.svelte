@@ -57,8 +57,8 @@
           {/if}
         </button>
       {/if}
+      <div class="home-stats-slot">
       {#if $publicStatsStore}
-      <div class="mt-3 flex gap-2 flex-wrap justify-center">
         <span class="px-3 py-1 rounded-full text-xs bg-darkbg border border-selected text-textcolor2">
           👥 {language.statsUsersToday.replace('{{count}}', $publicStatsStore.dau.toLocaleString())}
           <span class="text-textcolor2/60">({language.statsYesterday.replace('{{count}}', $publicStatsStore.yesterdayDau.toLocaleString())})</span>
@@ -66,8 +66,8 @@
         <span class="px-3 py-1 rounded-full text-xs bg-darkbg border border-selected text-textcolor2">
           📊 {language.statsVisitsToday.replace('{{count}}', $publicStatsStore.visits.toLocaleString())}
         </span>
-      </div>
       {/if}
+      </div>
     {/if}
     <div class="w-full flex p-4 flex-col text-textcolor max-w-4xl">
       {#if !$OpenRealmStore}

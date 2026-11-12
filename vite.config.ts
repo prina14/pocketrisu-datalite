@@ -22,7 +22,7 @@ export default defineConfig(({command, mode}) => {
           const css = readFileSync('./src/styles/startup-shell.css', 'utf8');
           return html.replace('<!-- startup-style -->', `<style>${css}</style>`)
             .replace('<!-- startup-layout -->', readFileSync('./src/etc/startup-layout.html', 'utf8'))
-            .replace('<!-- startup-presentation -->', `<script>${readFileSync('./src/ts/startupPresentation.js', 'utf8').replace(/^export /gm, '')}\napplyStartupPresentation(document.getElementById('preloading'));</script>`);
+            .replace('<!-- startup-presentation -->', `<script>${readFileSync('./src/ts/startupPresentation.js', 'utf8').replace(/^export /gm, '').replace(/\b__APP_VERSION__\b/g, JSON.stringify(pkg.version))}\napplyStartupPresentation(document.getElementById('preloading'));</script>`);
         },
       },
       svelte({

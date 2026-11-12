@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { characterActivity } from '../../ts/characterActivity';
     import {
     CharEmotion,
@@ -112,6 +113,13 @@
   }
 
   let { hidden = false }: Props = $props();
+  // The startup shell already occupies this space. Animate only subsequent
+  // drawer toggles, rather than reopening the sidebar during the handoff.
+  const initiallyHidden = untrack(() => hidden);
+  let initialPlacement = $state(true);
+  $effect(() => {
+    if (hidden !== initiallyHidden || $sideBarClosing) initialPlacement = false;
+  });
   initSupport();
 
   sideBarClosing.set(false)
@@ -1152,6 +1160,7 @@
   class:px-2={$DynamicGUI}
   class:px-4={!$DynamicGUI}
   class:dynamic-sidebar={$DynamicGUI}
+  class:initial-placement={initialPlacement}
   class:hidden={hidden}
   class:flex={!hidden}
   onanimationend={() => {
@@ -1183,6 +1192,7 @@
   {/if}
   {#if sideBarMode === 0}
     {#if $selectedCharID < 0 || $settingsOpen}
+      <div class="home-support-slot">
       {#if $supportEnabled}
         <!-- Same card rhythm as the recent-chat rows below (p-2.5, round leading badge). -->
         <button
@@ -1196,6 +1206,7 @@
           <span class="truncate text-sm font-medium text-textcolor">{language.supportBanner}</span>
         </button>
       {/if}
+      </div>
       <span class="block text-base font-semibold text-textcolor mt-2">{language.recentChatsTitle}</span>
       {#if DBState.db.nodeOnlyHideRecentChats}
         <!-- list hidden by user preference -->
@@ -1299,6 +1310,9 @@
 {/if}
 
 <style>
+  .initial-placement {
+    animation: none !important;
+  }
   .editMode {
     min-width: 6rem;
   }
