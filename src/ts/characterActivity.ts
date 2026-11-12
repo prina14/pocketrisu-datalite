@@ -57,7 +57,7 @@ export function syncCharacterActivity(): Promise<void> {
             const batch = [...pending].slice(0, 50)
             if (batch.length) {
                 const response = await fetch('/api/character-activity', { method: 'POST', cache: 'no-store', signal: controller.signal,
-                    headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ ids: batch.map(([id]) => id) }) })
+                    headers: { ...headers, 'content-type': 'application/json', 'x-activity-snapshot': '1' }, body: JSON.stringify({ ids: batch.map(([id]) => id) }) })
                 if (!response.ok) return
                 const data = await response.json()
                 const values = { ...get(characterActivity) }
@@ -68,6 +68,17 @@ export function syncCharacterActivity(): Promise<void> {
                     values[id] = entry.lastInteraction
                     pending.delete(id)
                     acknowledged = true
+                }
+                if (response.headers.get('x-activity-snapshot') === '1'
+                    && Array.isArray(data.entries) && data.entries.length <= MAX) {
+                    // It is the same authenticated snapshot the follow-up GET
+                    // would return. Never overwrite an open submitted meanwhile.
+                    for (const entry of data.entries) {
+                        if (valid(entry.chaId) && Number.isSafeInteger(entry.lastInteraction)
+                            && entry.lastInteraction > 0 && !pending.has(entry.chaId)) values[entry.chaId] = entry.lastInteraction
+                    }
+                    characterActivity.set(values); etag = response.headers.get('etag') ?? undefined; persist()
+                    return
                 }
                 characterActivity.set(values); persist()
             }
