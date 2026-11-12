@@ -5,10 +5,7 @@
 // server-issued tokens. If upstream changes its auth flow, sync manually.
 // Server counterpart: server/node/server.cjs (createServerJwt, checkAuth,
 // /api/login, /api/token/refresh)
-import { language } from "src/lang"
-import { alertInput, waitAlert, notifyError } from "../alert"
-import { decodeRisuSave, encodeRisuSaveLegacy } from "./risuSave"
-import { normalizeChat } from "./database.svelte"
+import { Buffer as BufferPolyfill } from 'buffer'
 import type { PatchServerTimings } from "./saveMetrics"
 import { transferCache, type TransferCopyInput, type TransferVersion } from './transferCache'
 import { beginStartupPhase, measureStartupPhase } from '../startup'
@@ -16,6 +13,8 @@ import { recordSyncDiagnostic } from './syncDiagnostics'
 import { readHashAsync } from './readDeltaHash'
 import { gzipSync } from 'fflate'
 import { MIN_DELTA_BYTES, makeManifestAsync, applyDeltaAsync, validManifest } from '../../../server/node/readDelta.mjs'
+
+const Buffer = globalThis.Buffer ?? BufferPolyfill
 
 const AUTH_FETCH_TRANSIENT_MAX_RETRIES = 3
 const AUTH_FETCH_TRANSIENT_BASE_DELAY_MS = 500
@@ -82,7 +81,13 @@ const defaultAuthFetchRetryOptions: AuthFetchRetryOptions = {
 const USER_GESTURE_WINDOW_MS = 15_000
 let lastUserGestureAt = 0
 if (typeof window !== 'undefined') {
-    const markGesture = () => { lastUserGestureAt = Date.now() }
+    const markGesture = () => {
+        // The early transport can load long before editable UI exists. A tap
+        // on the public loading shell must not authorize a later auto-save
+        // to take the writer lock from another device.
+        if (document.getElementById('preloading')) return
+        lastUserGestureAt = Date.now()
+    }
     window.addEventListener('pointerdown', markGesture, { capture: true, passive: true })
     window.addEventListener('keydown', markGesture, { capture: true, passive: true })
 }
@@ -287,7 +292,7 @@ export type AssetManifestOperation =
     | { type: 'rename'; index: number; name: string }
     | { type: 'replace'; index: number; item: AssetManifestTuple }
 
-export interface StorageReadOptions { deferCacheWrite?: boolean; purpose?: 'cache-refresh' }
+export interface StorageReadOptions { deferCacheWrite?: boolean; purpose?: 'cache-refresh' | 'startup-prefetch' }
 export interface BootstrapInfo {
     importStatus: RisuAccountImportStatus
     backupReminderEnabled?: boolean
@@ -321,6 +326,9 @@ export class NodeStorage{
     private static sessionPending: Promise<void> | null = null
     private refreshPending: Promise<string> | null = null
     private bootInfo: Partial<BootstrapInfo> | null = null
+    private bootInfoAt = 0
+    private bootPrefetch: Promise<void> | null = null
+    private prefetchedCopy: TransferCopyInput | null = null
     private deferredCacheCopies = new Map<string, TransferCopyInput>()
     private cacheWrites: Promise<void> = Promise.resolve()
     private dbCopyRefreshTimer: ReturnType<typeof setTimeout> | undefined
@@ -390,6 +398,19 @@ export class NodeStorage{
         private readonly fetchFn: StorageFetch = defaultStorageFetch,
         private readonly retryOptions: Partial<AuthFetchRetryOptions> = {}
     ) {}
+
+    /** Start the ordinary authenticated/cache/delta read while the app code
+     * downloads. No dialogs, decode, DBState changes, writes or plugin imports.
+     * The consumer authenticates/revalidates this exact copy again. */
+    prefetchStartupDatabase(): Promise<void> {
+        if (this.bootPrefetch) return this.bootPrefetch
+        this.bootPrefetch = measureStartupPhase('early-storage-prefetch', async () => {
+            await this.checkAuth(true, false)
+            if (!this.authChecked || this.bootInfo?.importStatus?.blocking !== false) return
+            await this.getItem('database/database.bin', { deferCacheWrite: true, purpose: 'startup-prefetch' })
+        }).catch(() => { /* The normal app retries through its existing UI. */ })
+        return this.bootPrefetch
+    }
 
     async createAuth(){
         const now = Date.now()
@@ -476,6 +497,7 @@ export class NodeStorage{
         }))
 
         if(status === 429){
+            const { notifyError, waitAlert } = await import('../alert')
             notifyError(`Too many attempts. Please wait and try again later.`)
             await waitAlert()
             throw new Error('Too many login attempts')
@@ -536,7 +558,7 @@ export class NodeStorage{
             ?? new DOMException('The operation was aborted.', 'AbortError')
     }
 
-    private async authFetch(input: RequestInfo | URL, init: RequestInit = {}, retry = true) {
+    private async authFetch(input: RequestInfo | URL, init: RequestInit = {}, retry = true, interactive = true) {
         const retryOptions = this.getAuthFetchRetryOptions()
         let transientRetries = 0
 
@@ -546,7 +568,7 @@ export class NodeStorage{
             }
 
             try {
-                const response = await this.authFetchOnce(input, init, retry)
+                const response = await this.authFetchOnce(input, init, retry, interactive)
                 if (!this.isTransientStatus(response.status) || transientRetries >= retryOptions.maxRetries) {
                     return response
                 }
@@ -612,8 +634,9 @@ export class NodeStorage{
         }
     }
 
-    private async authFetchOnce(input: RequestInfo | URL, init: RequestInit = {}, retry = true) {
-        await this.checkAuth()
+    private async authFetchOnce(input: RequestInfo | URL, init: RequestInit = {}, retry = true, interactive = true) {
+        await this.checkAuth(false, interactive)
+        if (!interactive && !this.authChecked) throw new Error('Startup authentication unavailable')
         const headers = new Headers(init.headers)
         headers.set('risu-auth', await this.createAuth())
         headers.set('x-session-id', NodeStorage.sessionId)
@@ -636,8 +659,8 @@ export class NodeStorage{
         if(retry && await this.shouldRetryAuth(response)){
             this.authChecked = false
             this.cachedJwt = null
-            await this.checkAuth()
-            return this.authFetchOnce(input, init, false)
+            await this.checkAuth(false, interactive)
+            return this.authFetchOnce(input, init, false, interactive)
         }
 
         return response
@@ -652,9 +675,9 @@ export class NodeStorage{
         }
     }
 
-    private buildStorageRequestMessage(op: string, status?: number, serverMessage?: string): string {
+    private async buildStorageRequestMessage(op: string, status?: number, serverMessage?: string): Promise<string> {
         let message = status === 413 && (op === 'setItem' || op === 'setItems')
-            ? language.errors.storageRequestTooLarge
+            ? (await import('src/lang')).language.errors.storageRequestTooLarge
             : `${op} failed${status ? ` with HTTP ${status}` : ''}`
         if (serverMessage) {
             message += `: ${serverMessage}`
@@ -665,7 +688,7 @@ export class NodeStorage{
     private async storageRequestError(op: string, response: Response): Promise<StorageRequestError> {
         const serverMessage = await this.readStorageServerMessage(response)
         return new StorageRequestError(
-            this.buildStorageRequestMessage(op, response.status, serverMessage),
+            await this.buildStorageRequestMessage(op, response.status, serverMessage),
             op,
             response.status,
             serverMessage
@@ -718,11 +741,17 @@ export class NodeStorage{
         }
         const isDatabase = key === 'database/database.bin'
         const background = options.purpose === 'cache-refresh'
+        const prefetch = options.purpose === 'startup-prefetch'
+        if (isDatabase && !background && !prefetch && this.bootPrefetch) {
+            const pending = this.bootPrefetch
+            await measureStartupPhase('early-storage-wait', () => pending)
+            if (this.bootPrefetch === pending) this.bootPrefetch = null
+        }
         const generation = isDatabase ? ++this.dbCopyReadGeneration : 0
         if (isDatabase && background) headers['x-read-cache-refresh'] = '1'
         const measured = async <T>(phase: string, operation: () => T | Promise<T>): Promise<T> =>
-            isDatabase && !background ? measureStartupPhase(`database-${phase}`, operation) : operation()
-        const readRequest = (url: string, init: RequestInit) => measured('server-read', () => this.authFetch(url, init))
+            isDatabase && !background ? measureStartupPhase(`${prefetch ? 'early-database' : 'database'}-${phase}`, operation) : operation()
+        const readRequest = (url: string, init: RequestInit) => measured('server-read', () => this.authFetch(url, init, true, !prefetch))
         const copyKey = isDatabase ? 'db:' + key : key.startsWith('plugin-storage/')
             ? 'plugin:' + Buffer.from(key.slice('plugin-storage/'.length).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')
             : null
@@ -734,14 +763,17 @@ export class NodeStorage{
                 'x-read-check-only': '1', 'if-read-revision': version.revision!,
                 ...(isDatabase ? { 'x-read-prepared-accept': '1' } : {}),
             },
-        }))
-        const copy = copyKey ? await measured('cache-read', () => transferCache.get(copyKey, isDatabase ? version => {
+        }, true, !prefetch))
+        const memoryCopy = isDatabase && !prefetch && !background ? this.prefetchedCopy : null
+        if (memoryCopy) this.prefetchedCopy = null
+        const copy = memoryCopy ?? (copyKey ? await measured('cache-read', () => transferCache.get(copyKey, isDatabase ? version => {
             if (!version.revision) return
             earlyVersion = version
             earlyProbe = probe(version)
             // Observe failures immediately while the IDB body is still loading.
             void earlyProbe.catch(() => {})
-        } : undefined)) : null
+        } : undefined)) : null)
+        if (memoryCopy) recordSyncDiagnostic('startup-copy-reused', { bytes: memoryCopy.data.length, etag: memoryCopy.etag })
         if (copy) headers['if-none-match'] = copy.etag
         let da: Response
         let probed: Response | null = null
@@ -758,7 +790,9 @@ export class NodeStorage{
             if (probed.status === 304) {
                 if (isDatabase && !background) this._lastDbEtag = copy.etag
                 const next = probed.headers.get('x-read-revision')
+                if (prefetch) this.prefetchedCopy = { ...copy, key: copyKey!, revision: next ?? copy.revision }
                 if (next && next !== copy.revision) await transferCache.updateRevision?.(copyKey!, copy.etag, next)
+                if (memoryCopy && next) memoryCopy.revision = next
                 return Buffer.from(copy.data)
             }
             // Old servers ignore the probe header and return a normal body.
@@ -788,6 +822,8 @@ export class NodeStorage{
         if (da.status === 304 && copy) {
             if (isDatabase && !background) this._lastDbEtag = copy.etag
             const revision = da.headers.get('x-read-revision')
+            if (prefetch) this.prefetchedCopy = { ...copy, key: copyKey!, revision: revision ?? copy.revision }
+            if (memoryCopy && revision) memoryCopy.revision = revision
             if (revision) await transferCache.updateRevision?.(copyKey!, copy.etag, revision)
             return Buffer.from(copy.data)
         }
@@ -827,6 +863,7 @@ export class NodeStorage{
             const snapshot = { key: copyKey, etag: copyEtag, data: new Uint8Array(data), revision: da.headers.get('x-read-revision') ?? undefined }
             if (isDatabase) {
                 if (generation === this.dbCopyReadGeneration) {
+                    if (prefetch) this.prefetchedCopy = snapshot
                     this.deferredCacheCopies.delete(copyKey)
                     if (options.deferCacheWrite) this.deferredCacheCopies.set(copyKey, snapshot)
                     else await this.persistDbCopy(snapshot, !background)
@@ -876,18 +913,19 @@ export class NodeStorage{
     // opened its own password prompt.
     private authPending: Promise<void> | null = null
 
-    private async checkAuth(bootstrap = false){
+    private async checkAuth(bootstrap = false, interactive = true){
         if(!this.authChecked){
-            this.authPending ??= this.runAuthCheck(bootstrap).finally(() => {
+            this.authPending ??= this.runAuthCheck(bootstrap, interactive).finally(() => {
                 this.authPending = null
             })
             await this.authPending
+            if (interactive && !this.authChecked) await this.checkAuth(bootstrap, true)
             return
         }
         await this.initSession()
     }
 
-    private async runAuthCheck(bootstrap = false){
+    private async runAuthCheck(bootstrap = false, interactive = true){
 
         if(!this.authChecked){
             this.bootInfo = null
@@ -899,7 +937,10 @@ export class NodeStorage{
                 }
             }, (res) => res.json())
 
+            if (!interactive && (data.status !== 'success' || typeof data.token !== 'string' || !data.token)) return
+
             if(data.status === 'unset'){
+                const [{ alertInput }, { language }] = await Promise.all([import('../alert'), import('src/lang')])
                 const input = await digestPassword(await measureStartupPhase('auth-password-prompt', () => alertInput(language.setNodePassword)))
                 const status = await authRequest('/api/set_password',{
                     method: "POST",
@@ -920,6 +961,7 @@ export class NodeStorage{
                 return
             }
             else if(data.status === 'incorrect'){
+                const [{ alertInput }, { language }] = await Promise.all([import('../alert'), import('src/lang')])
                 const input = await digestPassword(await measureStartupPhase('auth-password-prompt', () => alertInput(language.inputNodePassword)))
                 await this.loginWithPassword(input)
                 await this.initSession()
@@ -940,6 +982,7 @@ export class NodeStorage{
                         backupReminderEnabled: typeof boot.backupReminderEnabled === 'boolean'
                             ? boot.backupReminderEnabled : undefined,
                     }
+                    this.bootInfoAt = Date.now()
                 }
                 this.authChecked = true
             }
@@ -1635,7 +1678,8 @@ export class NodeStorage{
         const boot = this.bootInfo
         this.bootInfo = null
         return {
-            importStatus: boot?.importStatus ?? await this.getRisuAccountImportStatus(),
+            importStatus: boot?.importStatus && Date.now() - this.bootInfoAt < 1000
+                ? boot.importStatus : await this.getRisuAccountImportStatus(),
             backupReminderEnabled: boot?.backupReminderEnabled,
         }
     }
@@ -1667,6 +1711,7 @@ export class NodeStorage{
         if (da.status === 404) return null
         if (da.status < 200 || da.status >= 300) throw new Error(`fetchChatContent error: ${da.status}`)
         const buffer = new Uint8Array(await da.arrayBuffer())
+        const [{ decodeRisuSave }, { normalizeChat }] = await Promise.all([import('./risuSave'), import('./database.svelte')])
         return normalizeChat(await decodeRisuSave(buffer))
     }
 
@@ -1687,6 +1732,7 @@ export class NodeStorage{
         const deltaHeader = da.headers.get('x-chat-delta-base')
         const deltaBase = deltaHeader !== null && base && Number(deltaHeader) === base.count ? base.count : null
         const buffer = new Uint8Array(await da.arrayBuffer())
+        const [{ decodeRisuSave }, { normalizeChat }] = await Promise.all([import('./risuSave'), import('./database.svelte')])
         return { chat: normalizeChat(await decodeRisuSave(buffer)), deltaBase }
     }
 
@@ -1697,6 +1743,7 @@ export class NodeStorage{
      * the server could not verify the prefix (the caller then saves in full).
      */
     async saveChatContentDelta(chaId: string, chatIndex: number, chatId: string, chat: any, base: { count: number, fp: string } | null): Promise<'ok' | 'base-mismatch'> {
+        const { encodeRisuSaveLegacy } = await import('./risuSave')
         const encoded = encodeRisuSaveLegacy(chat)
         const headers: Record<string, string> = {
             'content-type': 'application/octet-stream',
@@ -1722,6 +1769,7 @@ export class NodeStorage{
     }
 
     async saveChatContent(chaId: string, chatIndex: number, chatId: string, chat: any): Promise<void> {
+        const { encodeRisuSaveLegacy } = await import('./risuSave')
         const encoded = encodeRisuSaveLegacy(chat)
         const da = await this.authFetch(`/api/chat-content/${encodeURIComponent(chaId)}/${chatIndex}`, {
             method: 'POST',
@@ -1807,6 +1855,7 @@ export class NodeStorage{
             const body = await da.json().catch(() => ({})) as { error?: string; code?: string }
             throw new CharacterArchiveError(body?.code ?? `HTTP_${da.status}`, body?.error ?? `archived inline error: ${da.status}`)
         }
+        const { decodeRisuSave } = await import('./risuSave')
         const decoded = await decodeRisuSave(new Uint8Array(await da.arrayBuffer())) as { characters?: any[] }
         return Array.isArray(decoded?.characters) ? decoded.characters : []
     }

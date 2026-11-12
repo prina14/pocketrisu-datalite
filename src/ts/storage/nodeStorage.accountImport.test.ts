@@ -251,6 +251,10 @@ describe('NodeStorage authentication with no answer', () => {
         const storage = freshStorage()
 
         const first = storage.getRisuAccountImportStatus().then(() => 'resolved', (error) => error)
+        // Login UI/language now load on demand. Install the prompt before
+        // advancing the artificial clock or typing into it.
+        await vi.dynamicImportSettled()
+        await vi.waitFor(() => expect(alertInput).toHaveBeenCalled())
         await vi.advanceTimersByTimeAsync(AUTH_TIMEOUT_MS * 3)
         expect(requests.calls('/api/login')).toHaveLength(0)
 

@@ -8,8 +8,6 @@
     import ChatScreen from './lib/ChatScreens/ChatScreen.svelte';
     import AlertComp from './lib/Others/AlertComp.svelte';
     import CharacterManager from './lib/CharacterManager/CharacterManager.svelte';
-    import FolderSettingsDialog from './lib/CharacterManager/FolderSettingsDialog.svelte';
-    import RisuAccountImportScreen from './lib/Setting/RisuAccountImportScreen.svelte';
     import { showRealmInfoStore, importCharacterProcess } from './ts/characterCards';
     import { importPreset, getDatabase, setDatabase } from './ts/storage/database.svelte';
     import { readModule } from './ts/process/modules';
@@ -23,11 +21,10 @@
     import { ArrowUpIcon, GlobeIcon, PlusIcon } from '@lucide/svelte';
     import { hypaV3ModalOpen, hypaV3ProgressStore } from "./ts/stores.svelte";
     import { assetViewerStore, closeAssetViewer } from './ts/assetViewer.svelte';
-    import HypaV3Progress from './lib/Others/HypaV3Progress.svelte';
-    import PluginAlertModal from './lib/Others/PluginAlertModal.svelte';
-    import UpdatePopup from './lib/Others/UpdatePopup.svelte';
-    import SupportDialog from './lib/Others/SupportDialog.svelte';
-    import ProtonImportDialog from './lib/Others/ProtonImportDialog.svelte';
+    import { folderSettingsTarget, pluginAlertModalStore } from './ts/stores.svelte';
+    import { updatePopupStore, selfUpdateProgressStore } from './ts/update';
+    import { supportDialogOpen } from './ts/support';
+    import { protonImportDialogOpen } from './ts/proton/protonImport';
     import BootBackupPrompt from './lib/Others/BootBackupPrompt.svelte';
     import PopupList from './lib/UI/PopupList.svelte';
     import LoadingOverlay from './lib/Others/LoadingOverlay.svelte';
@@ -50,6 +47,13 @@
     const loadBookmarkList = () => import('./lib/Others/BookmarkList.svelte');
     const loadAssetViewer = () => import('./lib/Others/AssetViewer.svelte');
     const loadPopupEditor = () => import('./lib/Others/PopupEditor.svelte');
+    const loadFolderSettings = () => import('./lib/CharacterManager/FolderSettingsDialog.svelte');
+    const loadAccountImport = () => import('./lib/Setting/RisuAccountImportScreen.svelte');
+    const loadHypaProgress = () => import('./lib/Others/HypaV3Progress.svelte');
+    const loadPluginAlert = () => import('./lib/Others/PluginAlertModal.svelte');
+    const loadUpdatePopup = () => import('./lib/Others/UpdatePopup.svelte');
+    const loadSupportDialog = () => import('./lib/Others/SupportDialog.svelte');
+    const loadProtonImport = () => import('./lib/Others/ProtonImportDialog.svelte');
 
     const closePresetList = () => { $openPresetList = false; $presetSelectCallback = null; };
     const closeModelPresetList = () => { $openModelPresetList = false; $modelPresetSelectCallback = null; };
@@ -234,7 +238,9 @@
             <span class="absolute top-4 left-4 font-bold text-[#bbbbbb] text-md md:text-lg">RisyGTP-9</span>
         </div>
     {:else if $accountImportBlocking}
-        <RisuAccountImportScreen />
+        <LazyBoundary load={loadAccountImport}>
+            {#snippet children(RisuAccountImportScreen)}<RisuAccountImportScreen />{/snippet}
+        </LazyBoundary>
     {:else if !$loadedStore && $startupPreview}
         <StartupPreview names={$startupPreview.names} total={$startupPreview.total} early={$startupPreview.early ?? false} heading={language.character} loadingLabel={language.loading} labels={language} />
     {:else if !$loadedStore}
@@ -269,7 +275,9 @@
             {#snippet children(RealmPopUp)}<RealmPopUp bind:openedData={$showRealmInfoStore} />{/snippet}
         </LazyBoundary>
     {/if}
-    <FolderSettingsDialog />
+    <LazyBoundary load={loadFolderSettings} activate={!!$folderSettingsTarget} overlay close={() => { $folderSettingsTarget = null; }}>
+        {#snippet children(FolderSettingsDialog)}<FolderSettingsDialog />{/snippet}
+    </LazyBoundary>
     {#if $openPresetList}
         <LazyBoundary load={loadBotpreset} overlay close={closePresetList}>
             {#snippet children(Botpreset)}<Botpreset close={closePresetList} />{/snippet}
@@ -318,13 +326,23 @@
     {/if}
     <SavePopupIconComp />
     {#if $hypaV3ProgressStore.open}
-        <HypaV3Progress />
+        <LazyBoundary load={loadHypaProgress} overlay>
+            {#snippet children(HypaV3Progress)}<HypaV3Progress />{/snippet}
+        </LazyBoundary>
     {/if}
-    <PluginAlertModal />
+    <LazyBoundary load={loadPluginAlert} activate={pluginAlertModalStore.open} overlay close={() => { pluginAlertModalStore.open = false; }}>
+        {#snippet children(PluginAlertModal)}<PluginAlertModal />{/snippet}
+    </LazyBoundary>
     <LoadingOverlay />
-    <UpdatePopup />
-    <SupportDialog />
-    <ProtonImportDialog />
+    <LazyBoundary load={loadUpdatePopup} activate={!!$updatePopupStore || !!$selfUpdateProgressStore} overlay>
+        {#snippet children(UpdatePopup)}<UpdatePopup />{/snippet}
+    </LazyBoundary>
+    <LazyBoundary load={loadSupportDialog} activate={$supportDialogOpen} overlay close={() => { $supportDialogOpen = false; }}>
+        {#snippet children(SupportDialog)}<SupportDialog />{/snippet}
+    </LazyBoundary>
+    <LazyBoundary load={loadProtonImport} activate={$protonImportDialogOpen} overlay close={() => { $protonImportDialogOpen = false; }}>
+        {#snippet children(ProtonImportDialog)}<ProtonImportDialog />{/snippet}
+    </LazyBoundary>
     <BootBackupPrompt />
     {#if popupStore.children}
         <PopupList />

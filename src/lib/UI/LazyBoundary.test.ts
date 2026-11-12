@@ -16,10 +16,10 @@ afterEach(async () => {
     document.body.replaceChildren()
 })
 
-async function show(load: () => Promise<{ default: Component<any> }>) {
+async function show(load: () => Promise<{ default: Component<any> }>, retained = false) {
     const target = document.createElement('div')
     document.body.appendChild(target)
-    app = mount(Harness, { target, props: { load } })
+    app = mount(Harness, { target, props: { load, retained } })
     await tick()
     return target
 }
@@ -38,6 +38,22 @@ test('waits for an explicit opening, then preserves child props and close callba
     target.querySelector<HTMLButtonElement>('[data-testid="loaded-panel"] button')!.click()
     await tick()
     expect(target.querySelector('[data-testid="loaded-panel"]')).toBeNull()
+})
+
+test('inactive retained boundaries do not load or render a placeholder; opening imports once and preserves the instance', async () => {
+    const load = vi.fn(async () => ({ default: Panel }))
+    const target = await show(load, true)
+    expect(load).not.toHaveBeenCalled()
+    expect(target.querySelector('[role="status"]')).toBeNull()
+    target.querySelector<HTMLButtonElement>('button')!.click()
+    await vi.waitFor(() => expect(target.querySelector('[data-testid="loaded-panel"]')).not.toBeNull())
+    const panel = target.querySelector('[data-testid="loaded-panel"]')
+    target.querySelector<HTMLButtonElement>('[data-testid="loaded-panel"] button')!.click()
+    await tick()
+    target.querySelector<HTMLButtonElement>('button')!.click()
+    await tick()
+    expect(target.querySelector('[data-testid="loaded-panel"]')).toBe(panel)
+    expect(load).toHaveBeenCalledOnce()
 })
 
 test('shows an actionable error and retries a failed module load', async () => {

@@ -47,6 +47,9 @@ jobs:
       - name: Verify precompressed application bytes
         run: node scripts/precompress-assets.mjs --verify dist
 
+      - name: Verify lightweight early storage entry
+        run: node scripts/check-startup-graph.mjs dist
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:

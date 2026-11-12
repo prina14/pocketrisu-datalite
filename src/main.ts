@@ -10,6 +10,9 @@ window.addEventListener('vite:preloadError', (event) => {
 
 void startAppAfterShellPaint(() => {
     void prefetchStartupPreview().then(renderStartupPreview).catch(() => {});
+    if (globalThis.__NODE__) {
+        void import('./ts/storage/startupStorage').then(module => module.startStartupStoragePrefetch()).catch(() => {});
+    }
     return import('./appEntry');
 }).catch(error => {
     console.error('Application startup failed:', error);

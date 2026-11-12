@@ -6,6 +6,7 @@ import {
     type AssetManifestOperation,
     type StorageReadOptions,
 } from "./nodeStorage"
+import { getStartupStorage } from './startupStorage'
 
 export class AutoStorage{
     isAccount:boolean = false
@@ -36,13 +37,13 @@ export class AutoStorage{
     async Init(){
         if(!this.realStorage){
             console.log("using node storage")
-            this.realStorage = new NodeStorage()
+            this.realStorage = getStartupStorage()
         }
     }
 
     async createAuth(): Promise<string> {
         if (!this.realStorage) {
-            this.realStorage = new NodeStorage()
+            this.realStorage = getStartupStorage()
         }
         return this.realStorage.createAuth()
     }

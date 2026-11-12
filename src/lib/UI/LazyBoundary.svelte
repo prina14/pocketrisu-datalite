@@ -8,14 +8,20 @@
         children: Snippet<[Component<any>]>;
         overlay?: boolean;
         close?: () => void;
+        /** Delay first import; retain the mounted component after activation. */
+        activate?: boolean;
     }
 
-    let { load, children, overlay = false, close }: Props = $props();
+    let { load, children, overlay = false, close, activate = true }: Props = $props();
     let loaded = $state<Component<any> | null>(null);
     let failed = $state(false);
     let attempt = $state(0);
+    let requested = $state(false);
+
+    $effect(() => { if (activate) requested = true; });
 
     $effect(() => {
+        if (!requested) return;
         attempt;
         const loader = load;
         let active = true;
@@ -33,7 +39,7 @@
 
 {#if loaded}
     {@render children(loaded)}
-{:else}
+{:else if activate}
     <div
         class="flex min-h-40 items-center justify-center p-6 {overlay ? 'fixed inset-0 z-40 bg-black/50 backdrop-blur-sm' : 'h-full w-full'}"
     >

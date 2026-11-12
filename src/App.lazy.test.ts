@@ -25,6 +25,12 @@ vi.mock('./ts/assetViewer.svelte', async () => ({
 }))
 vi.mock('./lang', () => ({ language: { loading: 'Loading', close: 'Close', errors: { networkFetch: 'Failed', chatLoadRetry: 'Retry' } } }))
 vi.mock('./ts/keepAliveAudio', () => ({ createKeepAliveAudio: vi.fn() }))
+vi.mock('./ts/update', async () => {
+    const state = await import('../test/helpers/AppLazyState.svelte')
+    return { updatePopupStore: state.updatePopupStore, selfUpdateProgressStore: state.selfUpdateProgressStore }
+})
+vi.mock('./ts/support', async () => ({ supportDialogOpen: (await import('../test/helpers/AppLazyState.svelte')).supportDialogOpen }))
+vi.mock('./ts/proton/protonImport', async () => ({ protonImportDialogOpen: (await import('../test/helpers/AppLazyState.svelte')).protonImportDialogOpen }))
 
 vi.mock('./lib/Setting/botpreset.svelte', async () => {
     imports.prompt.called(); await imports.prompt.ready
