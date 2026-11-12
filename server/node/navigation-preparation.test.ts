@@ -2,8 +2,41 @@ import { expect, test, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import path from 'node:path'
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
+const fingerprint = require('./chatFingerprint.cjs')
+const { encodeRisuSaveLegacy, decodeRisuSave } = require('./utils.cjs')
 
 const source = readFileSync('server/node/server.cjs', 'utf8')
+
+test('validated lore is omitted without mutating the server chat; changes and legacy readers receive it', async () => {
+    const start = source.indexOf('function readChatDeltaBase(')
+    const end = source.indexOf("app.get('/api/chat-content", start)
+    const context: any = { Buffer, ...fingerprint, encodeRisuSaveLegacy }
+    vm.runInNewContext(source.slice(start, end), context)
+    const lore = [{ content: 'lore'.repeat(200_000), extension: null }]
+    const chat = { id: 'c', message: [], localLore: lore, scriptstate: { step: 1 } }
+    const headers = { 'x-chat-base-count': '0', 'x-chat-base-fp': fingerprint.prefixFingerprint([], 0) }
+    const send = async (loreFp?: string) => {
+        let body: Buffer | undefined
+        const setHeader = vi.fn()
+        context.sendChatContent({ headers: { ...headers, ...(loreFp ? { 'x-chat-base-lore-fp': loreFp } : {}) } }, { setHeader, send: (b: Buffer) => { body = b } }, chat)
+        return { bytes: body!.length, decoded: await decodeRisuSave(body), setHeader }
+    }
+    const hash = fingerprint.loreFingerprint(lore)
+    const reused = await send(hash)
+    expect(reused.bytes).toBeLessThan(200)
+    expect(reused.decoded).not.toHaveProperty('localLore')
+    expect(reused.decoded.scriptstate).toEqual({ step: 1 })
+    expect(reused.setHeader).toHaveBeenCalledWith('x-chat-delta-lore', 'reuse')
+    expect(chat.localLore).toBe(lore)
+    expect((await send()).decoded.localLore).toEqual(lore)
+    chat.localLore = []
+    expect((await send(hash)).decoded.localLore).toEqual([])
+    // Empty read prefixes are supported; the write protocol stays unchanged.
+    expect(context.readChatDeltaBase({ headers })).toBeNull()
+})
 
 test('dashboard overview leaves unscanned cleanup results unavailable', async () => {
     const start = source.indexOf("app.get('/api/db/stats',")

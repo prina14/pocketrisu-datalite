@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from 'vitest'
 import { createChatDeltaSync, type ChatCopyStore, type ChatDeltaTransport } from './chatDeltaSync'
-import { messageFingerprints, prefixFingerprint } from './chatFingerprint'
+import { messageFingerprints, prefixFingerprint, loreFingerprint } from './chatFingerprint'
 
 const msg = (i: number, data = `message ${i}`) => ({ role: (i % 2 ? 'char' : 'user') as 'char' | 'user', data, chatId: `m${i}`, time: i })
 const chatOf = (n: number, extra: Record<string, unknown> = {}) => ({ id: 'chat', name: 'Chat', note: '', localLore: [], fmIndex: -1, message: Array.from({ length: n }, (_, i) => msg(i)), ...extra }) as any
@@ -12,7 +12,12 @@ function fakeServer(initial: any) {
         base.count <= stored.message.length && prefixFingerprint(messageFingerprints(stored.message.slice(0, base.count)), base.count) === base.fp
     const transport: ChatDeltaTransport = {
         fetchChatContentDelta: vi.fn(async (_a, _i, _c, base) => {
-            if (base && matches(base)) return { chat: structuredClone({ ...stored, message: stored.message.slice(base.count) }), deltaBase: base.count }
+            if (base && matches(base)) {
+                const result = structuredClone({ ...stored, message: stored.message.slice(base.count) })
+                const reuseLore = base.loreFp === loreFingerprint(stored.localLore)
+                if (reuseLore) delete result.localLore
+                return { chat: result, deltaBase: base.count, reuseLore }
+            }
             return { chat: structuredClone(stored), deltaBase: null }
         }),
         saveChatContentDelta: vi.fn(async (_a, _i, _c, chat, base) => {
@@ -65,6 +70,39 @@ describe('background chat preparation', () => {
 })
 
 describe('chat delta sync — loading', () => {
+    test.each([0, 20])('unchanged large lore is omitted and reassembled with %i cached messages', async count => {
+        const server = fakeServer(chatOf(count, { localLore: [{ content: 'lore'.repeat(250_000) }] }))
+        const copies = memoryCopies()
+        const sync = createChatDeltaSync(server.transport, copies)
+        await sync.fetchChat('char', 0, 'chat'); await settle()
+        const fetched = await sync.fetchChat('char', 0, 'chat')
+        const response = await (server.transport.fetchChatContentDelta as any).mock.results.at(-1).value
+        expect(response.reuseLore).toBe(true)
+        expect(response.chat).not.toHaveProperty('localLore')
+        expect(JSON.stringify(response.chat).length).toBeLessThan(200)
+        expect(fetched).toEqual(server.stored)
+    })
+
+    test('reuse of lore never masks changed script variables or cleared notes', async () => {
+        const server = fakeServer(chatOf(2, { note: 'old note', localLore: [{ content: 'lore' }], scriptstate: { step: 1 } }))
+        const copies = memoryCopies()
+        const sync = createChatDeltaSync(server.transport, copies)
+        await sync.fetchChat('char', 0, 'chat'); await settle()
+        server.stored.note = ''
+        server.stored.scriptstate.step = 2
+        expect(await sync.fetchChat('char', 0, 'chat')).toEqual(server.stored)
+    })
+
+    test('an older server returning all metadata is still supported', async () => {
+        const stored = chatOf(0, { localLore: [{ content: 'keep' }] })
+        const server = fakeServer(stored)
+        server.transport.fetchChatContentDelta = vi.fn(async () => ({ chat: structuredClone(stored), deltaBase: null }))
+        const copies = memoryCopies()
+        const sync = createChatDeltaSync(server.transport, copies)
+        await sync.fetchChat('char', 0, 'chat'); await settle()
+        expect(await sync.fetchChat('char', 0, 'chat')).toEqual(stored)
+    })
+
     test('an unchanged 20,000-message reopening reuses the validated body without another snapshot or cache write', async () => {
         const server = fakeServer(chatOf(20_000))
         const copies = memoryCopies()
@@ -113,8 +151,7 @@ describe('chat delta sync — loading', () => {
         expect(copies.map.get('char|chat')).toEqual(server.stored)
         await createChatDeltaSync(server.transport, copies).fetchChat('char', 0, 'chat')
         const sentBase = (server.transport.fetchChatContentDelta as any).mock.calls.at(-1)[3]
-        // Empty copies are persisted too; the existing server prefix protocol
-        // accepts only positive message counts, so these still use a full GET.
+        // Greeting-only chats can also validate an empty prefix and reuse lore.
         expect(sentBase?.count ?? 0).toBe(n)
     })
 

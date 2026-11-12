@@ -14,6 +14,13 @@ const samples: unknown[] = [
 ]
 
 describe('chat fingerprints', () => {
+    test('lore fingerprints agree across runtimes and preserve explicit nulls', () => {
+        const lore = [{ content: 'large lore', extensions: { enabled: null } }]
+        expect(client.loreFingerprint(lore)).toBe(server.loreFingerprint(lore))
+        expect(client.loreFingerprint(lore)).not.toBe(client.loreFingerprint([{ content: 'large lore', extensions: {} }]))
+        expect(client.loreFingerprint(undefined)).toBe(client.loreFingerprint([]))
+        expect(client.loreFingerprint([{ b: 1, a: 'x' }])).toBe(client.loreFingerprint([{ a: 'x', b: 1 }]))
+    })
     test('client and server implementations agree', () => {
         for (const sample of samples) {
             expect(client.canon(sample)).toBe(server.canon(sample))

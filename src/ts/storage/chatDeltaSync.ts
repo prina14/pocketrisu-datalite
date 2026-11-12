@@ -1,5 +1,5 @@
 import type { Chat } from './database.svelte'
-import { messageFingerprints, prefixFingerprint } from './chatFingerprint'
+import { messageFingerprints, prefixFingerprint, loreFingerprint } from './chatFingerprint'
 import rfdc from 'rfdc'
 import isEqual from 'lodash/isEqual'
 import type { ChatCopyStore } from './chatCopyStore'
@@ -25,7 +25,7 @@ export { indexedDbChatCopies } from './chatCopyStore'
 // complete (verified prefix + fetched rest) or fetched whole.
 
 export interface ChatDeltaTransport {
-    fetchChatContentDelta(chaId: string, chatIndex: number, chatId: string, base: { count: number, fp: string } | null, options?: { signal?: AbortSignal; prefetch?: boolean }): Promise<{ chat: any, deltaBase: number | null } | null>
+    fetchChatContentDelta(chaId: string, chatIndex: number, chatId: string, base: { count: number, fp: string, loreFp?: string } | null, options?: { signal?: AbortSignal; prefetch?: boolean }): Promise<{ chat: any, deltaBase: number | null, reuseLore?: boolean } | null>
     saveChatContentDelta(chaId: string, chatIndex: number, chatId: string, chat: any, base: { count: number, fp: string } | null): Promise<'ok' | 'base-mismatch'>
 }
 
@@ -71,18 +71,21 @@ export function createChatDeltaSync(transport: ChatDeltaTransport, copies: ChatC
         }
         if (options?.signal?.aborted) return null
         const copyFingerprints = copy ? messageFingerprints(copy.message) : null
-        const base = copy && copy.message.length > 0 && copyFingerprints
-            ? { count: copy.message.length, fp: prefixFingerprint(copyFingerprints, copy.message.length) }
+        const base = copy && copyFingerprints
+            ? { count: copy.message.length, fp: prefixFingerprint(copyFingerprints, copy.message.length), loreFp: loreFingerprint(copy.localLore) }
             : null
 
         const result = await transport.fetchChatContentDelta(chaId, chatIndex, chatId, base, options)
         if (!result || options?.signal?.aborted) return null
 
-        let full: Chat = result.chat
+        if (result.reuseLore && (!copy || result.deltaBase !== copy.message.length)) {
+            throw new Error('Invalid cached lore response')
+        }
+        let full: Chat = result.reuseLore ? { ...result.chat, localLore: copy!.localLore } : result.chat
         let fingerprints: string[]
         if (result.deltaBase !== null && copy && copyFingerprints && result.deltaBase === copy.message.length) {
             const hasNewMessages = result.chat.message.length > 0
-            full = { ...result.chat, message: hasNewMessages ? copy.message.concat(result.chat.message) : copy.message }
+            full = { ...full, message: hasNewMessages ? copy.message.concat(result.chat.message) : copy.message }
             fingerprints = hasNewMessages ? copyFingerprints.concat(messageFingerprints(result.chat.message)) : copyFingerprints
         } else {
             fingerprints = messageFingerprints(full.message ?? [])

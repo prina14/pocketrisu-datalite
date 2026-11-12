@@ -5,7 +5,7 @@ const https = require('https');
 const path = require('path');
 const net = require('net');
 const compression = require('compression');
-const { messageFingerprints, prefixFingerprint } = require('./chatFingerprint.cjs');
+const { messageFingerprints, prefixFingerprint, loreFingerprint } = require('./chatFingerprint.cjs');
 const htmlparser = require('node-html-parser');
 const { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync, statSync } = require('fs');
 const fs = require('fs/promises')
@@ -6919,12 +6919,12 @@ function restoreColdStorageChat(chat) {
 // spliced onto the stored prefix. Anything that does not verify falls back
 // to a full transfer (GET) or a 409 the client answers with a full save
 // (POST) — the delta path never guesses. See chatFingerprint.cjs.
-function readChatDeltaBase(req) {
+function readChatDeltaBase(req, allowEmpty = false) {
     const countHeader = req.headers['x-chat-base-count'];
     const fp = req.headers['x-chat-base-fp'];
     if (typeof countHeader !== 'string' || typeof fp !== 'string' || !fp) return null;
     const count = Number(countHeader);
-    if (!Number.isInteger(count) || count < 1) return null;
+    if (!Number.isInteger(count) || count < (allowEmpty ? 0 : 1)) return null;
     return { count, fp };
 }
 
@@ -6935,16 +6935,21 @@ function chatPrefixMatches(chat, base) {
 }
 
 function sendChatContent(req, res, chat) {
-    res.setHeader('Vary', 'x-chat-base-count, x-chat-base-fp, x-chat-prefetch');
+    res.setHeader('Vary', 'x-chat-base-count, x-chat-base-fp, x-chat-base-lore-fp, x-chat-prefetch');
     res.setHeader('Content-Type', 'application/octet-stream');
-    const base = readChatDeltaBase(req);
+    const base = readChatDeltaBase(req, true);
     const delta = base && chatPrefixMatches(chat, base);
-    const payload = Buffer.from(encodeRisuSaveLegacy(delta ? { ...chat, message: chat.message.slice(base.count) } : chat));
+    const loreFp = req.headers['x-chat-base-lore-fp'];
+    const reuseLore = delta && typeof loreFp === 'string' && loreFp === loreFingerprint(chat.localLore);
+    const responseChat = delta ? { ...chat, message: chat.message.slice(base.count) } : chat;
+    if (reuseLore) delete responseChat.localLore;
+    const payload = Buffer.from(encodeRisuSaveLegacy(responseChat));
     // Background preparation must never pull an unbounded conversation body.
     if (req.headers['x-chat-prefetch'] === '1' && payload.length > 2 * 1024 * 1024) {
         return res.status(204).end();
     }
     if (delta) res.setHeader('x-chat-delta-base', String(base.count));
+    if (reuseLore) res.setHeader('x-chat-delta-lore', 'reuse');
     return res.send(payload);
 }
 

@@ -10,7 +10,7 @@
 // (a legacy message without chatId, a field one side normalizes) only costs a
 // full transfer — never a wrong merge.
 
-function canon(value) {
+function canon(value, keepNull = false) {
     if (value === null || value === undefined) return 'null';
     const type = typeof value;
     if (type === 'string') return JSON.stringify(value);
@@ -19,7 +19,7 @@ function canon(value) {
     if (type === 'bigint') return `"${value.toString()}n"`;
     if (Array.isArray(value)) {
         let out = '[';
-        for (let i = 0; i < value.length; i++) out += (i ? ',' : '') + canon(value[i]);
+        for (let i = 0; i < value.length; i++) out += (i ? ',' : '') + canon(value[i], keepNull);
         return out + ']';
     }
     if (ArrayBuffer.isView(value)) {
@@ -36,8 +36,8 @@ function canon(value) {
         let first = true;
         for (const key of keys) {
             const v = record[key];
-            if (v === undefined || v === null || typeof v === 'function') continue;
-            out += (first ? '' : ',') + JSON.stringify(key) + ':' + canon(v);
+            if (v === undefined || (!keepNull && v === null) || typeof v === 'function') continue;
+            out += (first ? '' : ',') + JSON.stringify(key) + ':' + canon(v, keepNull);
             first = false;
         }
         return out + '}';
@@ -74,4 +74,8 @@ function prefixFingerprint(fingerprints, count) {
     return hash64(`${count}|` + fingerprints.slice(0, count).join(''));
 }
 
-module.exports = { canon, hash64, messageFingerprint, messageFingerprints, prefixFingerprint };
+function loreFingerprint(lore) {
+    return hash64(canon(Array.isArray(lore) ? lore : [], true));
+}
+
+module.exports = { canon, hash64, messageFingerprint, messageFingerprints, prefixFingerprint, loreFingerprint };

@@ -1,8 +1,22 @@
 import { afterEach, expect, test, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { applyStartupPresentation } from './startupPresentation.js'
-import { cacheStartupPresentation } from './startupPresentationCache'
+import { cacheStartupPresentation, cacheRecentHomeVisibility } from './startupPresentationCache'
 const KEY = 'pocketrisu-startup-presentation-v1'
+
+test('recent home spacing is visible by default and honors the same hidden preference on refresh', () => {
+    const host = document.createElement('section')
+    applyStartupPresentation(host)
+    expect(host.dataset.startupHideRecentHome).toBe('false')
+    cacheStartupPresentation({ sideBarSize: 2, nodeOnlyHideRecentChats: false })
+    cacheRecentHomeVisibility(true)
+    applyStartupPresentation(host)
+    expect(host.dataset.startupHideRecentHome).toBe('true')
+    expect(host.style.getPropertyValue('--startup-sidebar-width')).toBe('496px')
+    cacheRecentHomeVisibility(false)
+    applyStartupPresentation(host)
+    expect(host.dataset.startupHideRecentHome).toBe('false')
+})
 afterEach(() => { localStorage.clear(); document.documentElement.removeAttribute('style'); vi.unstubAllGlobals() })
 
 test('stores appearance only and does not mutate the database or copy private content', () => {

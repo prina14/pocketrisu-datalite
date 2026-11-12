@@ -16,6 +16,7 @@ export function applyStartupPresentation(host, language) {
         }
     } catch { /* optional appearance copy */ }
     host.dataset.startupMode = window.innerWidth <= 800 && profile?.mobileUI !== false ? 'mobile' : 'desktop';
+    host.dataset.startupHideRecentHome = profile?.hideRecentHome === true ? 'true' : 'false';
     try {
         if ((language || localStorage.getItem('risu-lang')) === 'ko') {
             const korean = {

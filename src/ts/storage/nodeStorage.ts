@@ -1720,12 +1720,13 @@ export class NodeStorage{
      * answers with only the messages after it when the prefix verifies —
      * `deltaBase` is then set and `chat.message` holds just the rest.
      */
-    async fetchChatContentDelta(chaId: string, chatIndex: number, chatId: string, base: { count: number, fp: string } | null, options?: { signal?: AbortSignal; prefetch?: boolean }): Promise<{ chat: any, deltaBase: number | null } | null> {
+    async fetchChatContentDelta(chaId: string, chatIndex: number, chatId: string, base: { count: number, fp: string, loreFp?: string } | null, options?: { signal?: AbortSignal; prefetch?: boolean }): Promise<{ chat: any, deltaBase: number | null, reuseLore?: boolean } | null> {
         const headers: Record<string, string> = { 'x-chat-id': chatId }
         if (options?.prefetch) headers['x-chat-prefetch'] = '1'
         if (base) {
             headers['x-chat-base-count'] = String(base.count)
             headers['x-chat-base-fp'] = base.fp
+            if (base.loreFp) headers['x-chat-base-lore-fp'] = base.loreFp
         }
         const da = await this.authFetchGetWithFirstByteTimeout(`/api/chat-content/${encodeURIComponent(chaId)}/${chatIndex}`, { headers, signal: options?.signal })
         if (da.status === 404 || (da.status === 204 && options?.prefetch)) return null
@@ -1734,7 +1735,9 @@ export class NodeStorage{
         const deltaBase = deltaHeader !== null && base && Number(deltaHeader) === base.count ? base.count : null
         const buffer = new Uint8Array(await da.arrayBuffer())
         const [{ decodeRisuSave }, { normalizeChat }] = await Promise.all([import('./risuSave'), import('./database.svelte')])
-        return { chat: normalizeChat(await decodeRisuSave(buffer)), deltaBase }
+        const reuseLore = da.headers.get('x-chat-delta-lore') === 'reuse'
+        if (reuseLore && (!base?.loreFp || deltaBase === null)) throw new Error('Invalid cached lore response')
+        return { chat: normalizeChat(await decodeRisuSave(buffer)), deltaBase, reuseLore }
     }
 
     /**
