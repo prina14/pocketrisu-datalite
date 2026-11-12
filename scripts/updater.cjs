@@ -335,7 +335,9 @@ async function main() {
 
     // Phase 2: move new files from extracted to root
     const moved = [];
-    const skipMove = new Set(['save', 'scripts']);
+    // A protected path must not be replaced by a same-named package entry.
+    // This also covers empty backups/ shipped by older smoke-test packages.
+    const skipMove = new Set(keep);
     if (isWin || skipBinReplacement) skipMove.add('bin');
     try {
         for (const entry of newEntries) {

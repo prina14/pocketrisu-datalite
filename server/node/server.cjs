@@ -9587,7 +9587,9 @@ app.post('/api/self-update', async (req, res) => {
         }
 
         // Phase 2: move new files from extracted to app root
-        const skipMove = new Set(['save', 'scripts']);
+        // Preserve protected entries during installation as well as evacuation.
+        // Older packages may contain empty backups/ from their smoke test.
+        const skipMove = new Set(keep);
         if (isWin) skipMove.add('bin');
         const moved = [];
         try {
