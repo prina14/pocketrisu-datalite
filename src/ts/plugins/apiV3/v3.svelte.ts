@@ -2,7 +2,7 @@ import { allowedDbKeys, customProviderStore, getV2PluginAPIs, handlePluginInstal
 import { SandboxHost } from "./factory";
 import { getCurrentChat, getDatabase, normalizeChat } from "src/ts/storage/database.svelte";
 import { resolveClassicModelId } from "src/ts/process/request/modelPresetBinding";
-import { fetchChatFromServer, saveChatToServer } from "src/ts/storage/chatStorage";
+import { fetchChatForPlugin, saveChatToServer } from "src/ts/storage/chatStorage";
 import { SafeLocalPluginStorage, tagWhitelist } from "../pluginSafeClass";
 import { recordOwner, removeOwner, clearOwners } from "../pluginStorageMeta";
 import * as pluginStorageStore from "../pluginStorageStore";
@@ -1003,11 +1003,12 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
                 const slot = chats?.[chatIndex];
                 if(slot){
                     // A chat not opened yet is only a placeholder here (no
-                    // messages). Hand out the server's copy without loading
-                    // it into the app, like exports do; a fetch error throws.
+                    // messages). Read a detached, cache-validated copy without
+                    // loading it into the app. Share an existing UI read so a
+                    // selection hook cannot trigger a second full download.
                     if(slot._placeholder){
                         if(!slot.id) return null;
-                        return await fetchChatFromServer(db.characters[charId].chaId, chatIndex, slot.id);
+                        return await fetchChatForPlugin(db.characters[charId].chaId, chatIndex, slot.id);
                     }
                     return $state.snapshot(slot);
                 }

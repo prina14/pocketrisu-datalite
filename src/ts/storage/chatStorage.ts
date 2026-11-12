@@ -3,6 +3,7 @@ import { type Chat, type ChatStub, type ChatOrStub, isChatStub } from "./databas
 import { tick } from "svelte"
 import { writable } from "svelte/store"
 import { createChatDeltaSync, indexedDbChatCopies } from "./chatDeltaSync"
+import rfdc from 'rfdc'
 
 // ── Stub ↔ Placeholder conversion ───────────────────────────────────────────
 
@@ -120,6 +121,29 @@ const chatDeltaSync = createChatDeltaSync({
     saveChatContentDelta: (chaId, chatIndex, chatId, chat, base) => forageStorage.realStorage.saveChatContentDelta(chaId, chatIndex, chatId, chat, base),
 }, indexedDbChatCopies)
 
+// Foreground UI and read-only plugin calls can arrive in either order during
+// selection. Share their cache-validated read instead of downloading twice.
+const chatReadPromises = new Map<string, Promise<Chat | null>>()
+const cloneChat = rfdc({ circles: true })
+
+function fetchCachedChat(chaId: string, chatIndex: number, chatId: string): Promise<Chat | null> {
+    const key = chatKey(chaId, chatId)
+    const existing = chatReadPromises.get(key)
+    if (existing) return existing
+    const pending = chatDeltaSync.fetchChat(chaId, chatIndex, chatId)
+    chatReadPromises.set(key, pending)
+    const release = () => { if (chatReadPromises.get(key) === pending) chatReadPromises.delete(key) }
+    void pending.then(release, release)
+    return pending
+}
+
+/** Detached read-only snapshot; unopened chats stay placeholders in DBState. */
+export async function fetchChatForPlugin(chaId: string, chatIndex: number, chatId: string): Promise<Chat | null> {
+    const pending = hydrationPromises.get(chatKey(chaId, chatId)) ?? fetchCachedChat(chaId, chatIndex, chatId)
+    const full = await pending
+    return full ? cloneChat(full) : null
+}
+
 export async function saveChatToServer(chaId: string, chatIndex: number, chatId: string, chat: Chat): Promise<void> {
     await chatDeltaSync.saveChat(chaId, chatIndex, chatId, chat)
 }
@@ -182,7 +206,7 @@ export async function ensureChatHydrated(
         try {
             let full: Chat | null
             try {
-                full = await chatDeltaSync.fetchChat(chaId, index, chatId)
+                full = await fetchCachedChat(chaId, index, chatId)
             } catch (error) {
                 setChatLoadFailure(key, 'error')
                 throw error
